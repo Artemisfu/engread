@@ -13,6 +13,8 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
 import android.media.AudioAttributes
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
@@ -50,6 +52,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -140,6 +143,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.SpanStyle
@@ -722,6 +726,7 @@ private fun EngReadApp() {
                     suggestingBookId = suggestingChatBookId,
                     focusBookId = preferredChatBookId,
                     suggestionsByBook = chatSuggestionsByBook,
+                    settings = settings,
                     modifier = Modifier.fillMaxSize(),
                     bottomBar = {
                         HomeBottomBar(
@@ -732,6 +737,19 @@ private fun EngReadApp() {
                     onSendMessage = { book, text -> sendBookChatMessage(book, text) },
                     onRefreshSuggestions = { book -> requestChatSuggestions(book) },
                     onOpenReader = { book -> screen = AppScreen.Reader(book.id) },
+                    onAddLookupHistory = { activeBook, paragraphIndex, type, sourceText, resultText, phonetic ->
+                        scope.launch(Dispatchers.IO) {
+                            repository.addLookupHistory(
+                                activeBook,
+                                paragraphIndex,
+                                type,
+                                sourceText,
+                                resultText,
+                                phonetic,
+                            )
+                            lookupHistory = repository.getLookupHistory()
+                        }
+                    },
                 )
 
                 AppScreen.Settings -> SettingsScreen(
@@ -1035,11 +1053,13 @@ private fun ChatScreen(
     suggestingBookId: String?,
     focusBookId: String,
     suggestionsByBook: Map<String, List<String>>,
+    settings: ReaderSettings,
     modifier: Modifier = Modifier,
     bottomBar: @Composable () -> Unit,
     onSendMessage: (Book, String) -> Unit,
     onRefreshSuggestions: (Book) -> Unit,
     onOpenReader: (Book) -> Unit,
+    onAddLookupHistory: (Book, Int, LookupHistoryType, String, String, String) -> Unit,
 ) {
     var selectedBookId by rememberSaveable { mutableStateOf("") }
     val preferredBookId = remember(books, bookChats, focusBookId) {
@@ -1067,6 +1087,114 @@ private fun ChatScreen(
     }
     val visibleSuggestions = remoteSuggestions.ifEmpty { localSuggestions }
     var input by rememberSaveable(selectedBookId) { mutableStateOf("") }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val dictionary = remember(context) { EcdictDictionary(context.applicationContext) }
+    var wordStack by remember(selectedBookId) { mutableStateOf<List<WordEntry>>(emptyList()) }
+    var wordLookupSerial by remember(selectedBookId) { mutableStateOf(0) }
+    var ttsAccent by rememberSaveable { mutableStateOf(TtsAccent.US) }
+
+    fun closeTopWordCard() {
+        val nextStack = wordStack.dropLast(1)
+        wordStack = nextStack
+        if (nextStack.isEmpty()) {
+            wordLookupSerial += 1
+        }
+    }
+
+    fun lookupChatWord(word: String) {
+        val book = selectedBook ?: return
+        val normalizedWord = word.trim()
+        if (normalizedWord.isBlank()) return
+        val paragraphIndex = book.lastReadParagraph
+        val contextText = book.paragraphs.getOrNull(paragraphIndex)
+            .orEmpty()
+            .ifBlank { messages.takeLast(6).joinToString("\n") { it.content } }
+        val requestSerial = wordLookupSerial
+        val dictionaryEntry = runCatching { dictionary.lookup(normalizedWord) }.getOrNull()
+        if (dictionaryEntry != null) {
+            val shouldEnrichDetails = dictionaryEntry.needsLlmWordDetails() && settings.translation.isConfigured
+            val targetIndex = wordStack.size
+            val immediateEntry = dictionaryEntry.copy(detailsLoading = shouldEnrichDetails)
+            wordStack = wordStack + immediateEntry
+            onAddLookupHistory(
+                book,
+                paragraphIndex,
+                LookupHistoryType.WORD,
+                immediateEntry.word,
+                immediateEntry.toLookupHistoryText(),
+                immediateEntry.historyPhoneticText(),
+            )
+            if (shouldEnrichDetails) {
+                scope.launch {
+                    val result = runCatching {
+                        OpenAiWordLookup.lookup(normalizedWord, contextText, settings.translation)
+                    }
+                    result.onSuccess { enriched ->
+                        if (requestSerial != wordLookupSerial) return@onSuccess
+                        val merged = immediateEntry.mergeLlmWordDetails(enriched)
+                        wordStack = wordStack.replaceAtOrAppend(targetIndex, merged)
+                        onAddLookupHistory(
+                            book,
+                            paragraphIndex,
+                            LookupHistoryType.WORD,
+                            merged.word,
+                            merged.toLookupHistoryText(),
+                            merged.historyPhoneticText(),
+                        )
+                    }.onFailure {
+                        if (requestSerial != wordLookupSerial) return@onFailure
+                        wordStack = wordStack.replaceAtOrAppend(
+                            targetIndex,
+                            immediateEntry.copy(detailsLoading = false),
+                        )
+                    }
+                }
+            }
+            return
+        }
+        if (!settings.translation.isConfigured) {
+            wordStack = wordStack + WordEntry(
+                word = normalizedWord,
+                phonetic = "未知",
+                meaning = "本地词典未收录。请在设置中配置 API 后查阅。",
+            )
+            return
+        }
+        val targetIndex = wordStack.size
+        wordStack = wordStack + WordEntry(
+            word = normalizedWord,
+            phonetic = "查询中...",
+            meaning = "本地词典未收录，查阅中...",
+        )
+        scope.launch {
+            val result = runCatching {
+                OpenAiWordLookup.lookup(normalizedWord, contextText, settings.translation)
+            }
+            result.onSuccess { entry ->
+                if (requestSerial != wordLookupSerial) return@onSuccess
+                wordStack = wordStack.replaceAtOrAppend(targetIndex, entry)
+                onAddLookupHistory(
+                    book,
+                    paragraphIndex,
+                    LookupHistoryType.WORD,
+                    entry.word,
+                    entry.toLookupHistoryText(),
+                    entry.historyPhoneticText(),
+                )
+            }.onFailure { error ->
+                if (requestSerial != wordLookupSerial) return@onFailure
+                wordStack = wordStack.replaceAtOrAppend(
+                    targetIndex,
+                    WordEntry(
+                        word = normalizedWord,
+                        phonetic = "查询失败",
+                        meaning = error.message ?: "查词失败",
+                    ),
+                )
+            }
+        }
+    }
 
     LaunchedEffect(messages.size, isSending, suggestionsLoading) {
         val target = listState.layoutInfo.totalItemsCount - 1
@@ -1094,7 +1222,19 @@ private fun ChatScreen(
         },
         bottomBar = {
             Column {
-                ChatInputBar(
+                wordStack.lastOrNull()?.let { entry ->
+                    WordLookupPanel(
+                        entry = entry,
+                        stackDepth = wordStack.size,
+                        ttsAccent = ttsAccent,
+                        onClose = { closeTopWordCard() },
+                        onLookupWord = { lookupChatWord(it) },
+                        onTtsAccentChange = { ttsAccent = it },
+                        onSpeak = {
+                            Toast.makeText(context, "可在阅读页使用系统 TTS 播放读音", Toast.LENGTH_SHORT).show()
+                        },
+                    )
+                } ?: ChatInputBar(
                     value = input,
                     enabled = selectedBook != null && !isSending,
                     sending = isSending,
@@ -1153,7 +1293,10 @@ private fun ChatScreen(
                         }
                     }
                     itemsIndexed(messages, key = { _, message -> message.id }) { _, message ->
-                        ChatMessageBubble(message)
+                        ChatMessageBubble(
+                            message = message,
+                            onLookupWord = { lookupChatWord(it) },
+                        )
                     }
                     if (isSending) {
                         item {
@@ -1334,7 +1477,10 @@ private fun ChatSuggestionsPanel(
 }
 
 @Composable
-private fun ChatMessageBubble(message: ChatMessage) {
+private fun ChatMessageBubble(
+    message: ChatMessage,
+    onLookupWord: (String) -> Unit,
+) {
     val fromUser = message.role == ChatRole.USER
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -1349,15 +1495,18 @@ private fun ChatMessageBubble(message: ChatMessage) {
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                Text(
-                    text = if (fromUser) "我" else "EngRead",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (fromUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontWeight = FontWeight.Bold,
-                )
+                if (!fromUser) {
+                    Text(
+                        text = "EngRead",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
                 MarkdownText(
                     markdown = message.content,
                     color = MaterialTheme.colorScheme.onSurface,
+                    onLookupWord = onLookupWord,
                 )
             }
         }
@@ -1368,76 +1517,301 @@ private fun ChatMessageBubble(message: ChatMessage) {
 private fun MarkdownText(
     markdown: String,
     color: Color,
+    onLookupWord: (String) -> Unit = {},
 ) {
     val lines = markdown.trim().lines()
-    var inCodeBlock = false
-    val codeLines = mutableListOf<String>()
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-        lines.forEach { rawLine ->
+        var index = 0
+        while (index < lines.size) {
+            val rawLine = lines[index]
             val line = rawLine.trimEnd()
-            if (line.trim().startsWith("```")) {
-                if (inCodeBlock) {
-                    MarkdownCodeBlock(codeLines.joinToString("\n"))
-                    codeLines.clear()
+            val trimmedLine = line.trim()
+            if (trimmedLine.startsWith("```")) {
+                val language = trimmedLine.removePrefix("```").trim().lowercase(Locale.US)
+                val codeLines = mutableListOf<String>()
+                index += 1
+                while (index < lines.size && !lines[index].trim().startsWith("```")) {
+                    codeLines += lines[index]
+                    index += 1
                 }
-                inCodeBlock = !inCodeBlock
-                return@forEach
-            }
-            if (inCodeBlock) {
-                codeLines += rawLine
-                return@forEach
-            }
-            when {
-                line.isBlank() -> Spacer(Modifier.height(3.dp))
-                line.startsWith("#") -> {
-                    val level = line.takeWhile { it == '#' }.length.coerceIn(1, 3)
-                    val text = line.drop(level).trim()
-                    Text(
-                        text = markdownInline(text),
-                        style = when (level) {
-                            1 -> MaterialTheme.typography.titleMedium
-                            2 -> MaterialTheme.typography.titleSmall
-                            else -> MaterialTheme.typography.bodyLarge
-                        },
-                        color = color,
-                        fontWeight = FontWeight.Bold,
-                    )
+                if (index < lines.size) index += 1
+                val code = codeLines.joinToString("\n")
+                if (language == "mermaid") {
+                    MermaidBlock(code)
+                } else {
+                    MarkdownCodeBlock(code)
                 }
-                line.trimStart().startsWith(">") -> {
-                    Text(
-                        text = markdownInline(line.trimStart().removePrefix(">").trim()),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier
-                            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
-                            .padding(horizontal = 10.dp, vertical = 7.dp),
-                    )
-                }
-                line.trimStart().startsWith("- ") || line.trimStart().startsWith("* ") -> {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("•", color = color, style = MaterialTheme.typography.bodyMedium)
-                        Text(
-                            text = markdownInline(line.trimStart().drop(2).trim()),
+            } else if (isMarkdownTableStart(lines, index)) {
+                val (table, nextIndex) = parseMarkdownTable(lines, index)
+                MarkdownTableBlock(
+                    table = table,
+                    color = color,
+                    onLookupWord = onLookupWord,
+                )
+                index = nextIndex
+            } else {
+                when {
+                    line.isBlank() -> Spacer(Modifier.height(3.dp))
+                    line.startsWith("#") -> {
+                        val level = line.takeWhile { it == '#' }.length.coerceIn(1, 3)
+                        val text = line.drop(level).trim()
+                        MarkdownInlineText(
+                            markdown = text,
+                            style = when (level) {
+                                1 -> MaterialTheme.typography.titleMedium
+                                2 -> MaterialTheme.typography.titleSmall
+                                else -> MaterialTheme.typography.bodyLarge
+                            },
+                            color = color,
+                            fontWeight = FontWeight.Bold,
+                            onLookupWord = onLookupWord,
+                        )
+                    }
+                    line.trimStart().startsWith(">") -> {
+                        MarkdownInlineText(
+                            markdown = line.trimStart().removePrefix(">").trim(),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
+                                .padding(horizontal = 10.dp, vertical = 7.dp),
+                            onLookupWord = onLookupWord,
+                        )
+                    }
+                    line.trimStart().startsWith("- ") || line.trimStart().startsWith("* ") -> {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("•", color = color, style = MaterialTheme.typography.bodyMedium)
+                            MarkdownInlineText(
+                                markdown = line.trimStart().drop(2).trim(),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = color,
+                                modifier = Modifier.weight(1f),
+                                onLookupWord = onLookupWord,
+                            )
+                        }
+                    }
+                    else -> {
+                        MarkdownInlineText(
+                            markdown = line,
                             style = MaterialTheme.typography.bodyMedium,
                             color = color,
-                            modifier = Modifier.weight(1f),
+                            onLookupWord = onLookupWord,
                         )
                     }
                 }
-                else -> {
-                    Text(
-                        text = markdownInline(line),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = color,
-                    )
-                }
+                index += 1
             }
-        }
-        if (inCodeBlock && codeLines.isNotEmpty()) {
-            MarkdownCodeBlock(codeLines.joinToString("\n"))
         }
     }
 }
+
+@Composable
+private fun MarkdownInlineText(
+    markdown: String,
+    style: androidx.compose.ui.text.TextStyle,
+    color: Color,
+    modifier: Modifier = Modifier,
+    fontWeight: FontWeight? = null,
+    onLookupWord: (String) -> Unit,
+) {
+    val annotated = remember(markdown) { markdownInline(markdown) }
+    var layoutResult by remember(markdown) { mutableStateOf<TextLayoutResult?>(null) }
+    Text(
+        text = annotated,
+        style = style,
+        fontWeight = fontWeight,
+        color = color,
+        modifier = modifier.pointerInput(markdown) {
+            detectTapGestures(
+                onLongPress = { position ->
+                    val offset = layoutResult?.getOffsetForPosition(position) ?: return@detectTapGestures
+                    val word = extractWordAt(annotated.text, offset) ?: return@detectTapGestures
+                    onLookupWord(word)
+                },
+            )
+        },
+        onTextLayout = { layoutResult = it },
+    )
+}
+
+private data class MarkdownTable(
+    val headers: List<String>,
+    val rows: List<List<String>>,
+)
+
+private fun isMarkdownTableStart(lines: List<String>, index: Int): Boolean {
+    if (index + 1 >= lines.size) return false
+    val header = lines[index].trim()
+    val separator = lines[index + 1].trim()
+    if (!header.contains("|") || !separator.contains("|")) return false
+    val separatorCells = splitMarkdownTableRow(separator)
+    return separatorCells.isNotEmpty() && separatorCells.all { cell ->
+        val value = cell.trim()
+        value.count { it == '-' } >= 3 && value.all { it == '-' || it == ':' || it.isWhitespace() }
+    }
+}
+
+private fun parseMarkdownTable(lines: List<String>, startIndex: Int): Pair<MarkdownTable, Int> {
+    val headers = splitMarkdownTableRow(lines[startIndex])
+    val rows = mutableListOf<List<String>>()
+    var index = startIndex + 2
+    while (index < lines.size) {
+        val line = lines[index]
+        if (line.isBlank() || !line.contains("|")) break
+        rows += splitMarkdownTableRow(line)
+        index += 1
+    }
+    return MarkdownTable(headers = headers, rows = rows) to index
+}
+
+private fun splitMarkdownTableRow(line: String): List<String> =
+    line.trim().trim('|').split('|').map { it.trim() }
+
+@Composable
+private fun MarkdownTableBlock(
+    table: MarkdownTable,
+    color: Color,
+    onLookupWord: (String) -> Unit,
+) {
+    val columnCount = ((listOf(table.headers.size) + table.rows.map { it.size }).maxOrNull() ?: 0).coerceAtLeast(1)
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 1.dp,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier
+                .horizontalScroll(rememberScrollState())
+                .padding(1.dp),
+        ) {
+            MarkdownTableRow(
+                cells = table.headers,
+                columnCount = columnCount,
+                color = color,
+                header = true,
+                onLookupWord = onLookupWord,
+            )
+            table.rows.forEach { row ->
+                MarkdownTableRow(
+                    cells = row,
+                    columnCount = columnCount,
+                    color = color,
+                    header = false,
+                    onLookupWord = onLookupWord,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MarkdownTableRow(
+    cells: List<String>,
+    columnCount: Int,
+    color: Color,
+    header: Boolean,
+    onLookupWord: (String) -> Unit,
+) {
+    Row {
+        repeat(columnCount) { index ->
+            Box(
+                modifier = Modifier
+                    .widthIn(min = 112.dp, max = 190.dp)
+                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                    .background(if (header) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface)
+                    .padding(horizontal = 9.dp, vertical = 8.dp),
+            ) {
+                MarkdownInlineText(
+                    markdown = cells.getOrElse(index) { "" },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (header) MaterialTheme.colorScheme.onSurfaceVariant else color,
+                    fontWeight = if (header) FontWeight.Bold else null,
+                    onLookupWord = onLookupWord,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MermaidBlock(code: String) {
+    val html = remember(code) { mermaidHtml(code) }
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        tonalElevation = 1.dp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 180.dp, max = 420.dp),
+    ) {
+        AndroidView(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 180.dp, max = 420.dp),
+            factory = { context ->
+                WebView(context).apply {
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                    webViewClient = WebViewClient()
+                    loadDataWithBaseURL("https://engread.local/", html, "text/html", "UTF-8", null)
+                }
+            },
+            update = { webView ->
+                webView.loadDataWithBaseURL("https://engread.local/", html, "text/html", "UTF-8", null)
+            },
+        )
+    }
+}
+
+private fun mermaidHtml(code: String): String {
+    val escapedCode = code.escapeHtml()
+    return """
+        <!doctype html>
+        <html>
+        <head>
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <style>
+            html, body {
+              margin: 0;
+              padding: 8px;
+              background: transparent;
+              color: #1f2933;
+              font-family: sans-serif;
+            }
+            .mermaid {
+              width: max-content;
+              min-width: 100%;
+            }
+            svg {
+              max-width: none;
+            }
+          </style>
+          <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+        </head>
+        <body>
+          <pre class="mermaid">$escapedCode</pre>
+          <script>
+            mermaid.initialize({ startOnLoad: true, theme: 'neutral', securityLevel: 'loose' });
+          </script>
+        </body>
+        </html>
+    """.trimIndent()
+}
+
+private fun String.escapeHtml(): String =
+    buildString {
+        this@escapeHtml.forEach { char ->
+            when (char) {
+                '&' -> append("&amp;")
+                '<' -> append("&lt;")
+                '>' -> append("&gt;")
+                '"' -> append("&quot;")
+                else -> append(char)
+            }
+        }
+    }
 
 @Composable
 private fun MarkdownCodeBlock(code: String) {

@@ -12,7 +12,7 @@ if [[ ! -f "$APK" ]]; then
 fi
 
 adb start-server >/dev/null
-DEVICES="$(adb devices | awk 'NR > 1 && $2 == "device" {print $1}')"
+DEVICES="$(adb devices | sed '1d' | grep -E '[[:space:]]device$' || true)"
 
 if [[ -z "$DEVICES" ]]; then
   echo "没有检测到已授权的 Android 设备。"
