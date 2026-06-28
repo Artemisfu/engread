@@ -47,6 +47,8 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.runtime:runtime-saveable")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+    implementation("org.commonmark:commonmark:0.29.0")
+    implementation("org.commonmark:commonmark-ext-gfm-tables:0.29.0")
     implementation("io.documentnode:epub4j-core:4.2.3") {
         exclude(group = "xmlpull", module = "xmlpull")
     }

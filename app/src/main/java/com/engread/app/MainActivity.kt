@@ -52,7 +52,6 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -155,6 +154,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -189,6 +189,31 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import org.commonmark.ext.gfm.tables.TableBlock
+import org.commonmark.ext.gfm.tables.TableBody
+import org.commonmark.ext.gfm.tables.TableCell
+import org.commonmark.ext.gfm.tables.TableHead
+import org.commonmark.ext.gfm.tables.TableRow
+import org.commonmark.ext.gfm.tables.TablesExtension
+import org.commonmark.node.BlockQuote
+import org.commonmark.node.BulletList
+import org.commonmark.node.Code
+import org.commonmark.node.Emphasis
+import org.commonmark.node.FencedCodeBlock
+import org.commonmark.node.HardLineBreak
+import org.commonmark.node.Heading
+import org.commonmark.node.HtmlInline
+import org.commonmark.node.IndentedCodeBlock
+import org.commonmark.node.Link
+import org.commonmark.node.ListItem
+import org.commonmark.node.Node
+import org.commonmark.node.OrderedList
+import org.commonmark.node.Paragraph
+import org.commonmark.node.SoftLineBreak
+import org.commonmark.node.StrongEmphasis
+import org.commonmark.node.Text as MarkdownTextNode
+import org.commonmark.node.ThematicBreak
+import org.commonmark.parser.Parser
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.roundToInt
@@ -1513,115 +1538,46 @@ private fun ChatMessageBubble(
     }
 }
 
+private val chatMarkdownParser: Parser by lazy {
+    Parser.builder()
+        .extensions(listOf(TablesExtension.create()))
+        .build()
+}
+
 @Composable
 private fun MarkdownText(
     markdown: String,
     color: Color,
     onLookupWord: (String) -> Unit = {},
 ) {
-    val lines = markdown.trim().lines()
+    val document = remember(markdown) { chatMarkdownParser.parse(markdown.trim()) }
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-        var index = 0
-        while (index < lines.size) {
-            val rawLine = lines[index]
-            val line = rawLine.trimEnd()
-            val trimmedLine = line.trim()
-            if (trimmedLine.startsWith("```")) {
-                val language = trimmedLine.removePrefix("```").trim().lowercase(Locale.US)
-                val codeLines = mutableListOf<String>()
-                index += 1
-                while (index < lines.size && !lines[index].trim().startsWith("```")) {
-                    codeLines += lines[index]
-                    index += 1
-                }
-                if (index < lines.size) index += 1
-                val code = codeLines.joinToString("\n")
-                if (language == "mermaid") {
-                    MermaidBlock(code)
-                } else {
-                    MarkdownCodeBlock(code)
-                }
-            } else if (isMarkdownTableStart(lines, index)) {
-                val (table, nextIndex) = parseMarkdownTable(lines, index)
-                MarkdownTableBlock(
-                    table = table,
-                    color = color,
-                    onLookupWord = onLookupWord,
-                )
-                index = nextIndex
-            } else {
-                when {
-                    line.isBlank() -> Spacer(Modifier.height(3.dp))
-                    line.startsWith("#") -> {
-                        val level = line.takeWhile { it == '#' }.length.coerceIn(1, 3)
-                        val text = line.drop(level).trim()
-                        MarkdownInlineText(
-                            markdown = text,
-                            style = when (level) {
-                                1 -> MaterialTheme.typography.titleMedium
-                                2 -> MaterialTheme.typography.titleSmall
-                                else -> MaterialTheme.typography.bodyLarge
-                            },
-                            color = color,
-                            fontWeight = FontWeight.Bold,
-                            onLookupWord = onLookupWord,
-                        )
-                    }
-                    line.trimStart().startsWith(">") -> {
-                        MarkdownInlineText(
-                            markdown = line.trimStart().removePrefix(">").trim(),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier
-                                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
-                                .padding(horizontal = 10.dp, vertical = 7.dp),
-                            onLookupWord = onLookupWord,
-                        )
-                    }
-                    line.trimStart().startsWith("- ") || line.trimStart().startsWith("* ") -> {
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text("•", color = color, style = MaterialTheme.typography.bodyMedium)
-                            MarkdownInlineText(
-                                markdown = line.trimStart().drop(2).trim(),
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = color,
-                                modifier = Modifier.weight(1f),
-                                onLookupWord = onLookupWord,
-                            )
-                        }
-                    }
-                    else -> {
-                        MarkdownInlineText(
-                            markdown = line,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = color,
-                            onLookupWord = onLookupWord,
-                        )
-                    }
-                }
-                index += 1
-            }
-        }
+        MarkdownNodeChildren(
+            parent = document,
+            color = color,
+            onLookupWord = onLookupWord,
+        )
     }
 }
 
 @Composable
 private fun MarkdownInlineText(
-    markdown: String,
+    annotated: AnnotatedString,
     style: androidx.compose.ui.text.TextStyle,
     color: Color,
     modifier: Modifier = Modifier,
     fontWeight: FontWeight? = null,
+    textAlign: TextAlign? = null,
     onLookupWord: (String) -> Unit,
 ) {
-    val annotated = remember(markdown) { markdownInline(markdown) }
-    var layoutResult by remember(markdown) { mutableStateOf<TextLayoutResult?>(null) }
+    var layoutResult by remember(annotated.text) { mutableStateOf<TextLayoutResult?>(null) }
     Text(
         text = annotated,
         style = style,
         fontWeight = fontWeight,
         color = color,
-        modifier = modifier.pointerInput(markdown) {
+        textAlign = textAlign,
+        modifier = modifier.pointerInput(annotated.text) {
             detectTapGestures(
                 onLongPress = { position ->
                     val offset = layoutResult?.getOffsetForPosition(position) ?: return@detectTapGestures
@@ -1634,46 +1590,158 @@ private fun MarkdownInlineText(
     )
 }
 
-private data class MarkdownTable(
-    val headers: List<String>,
-    val rows: List<List<String>>,
-)
-
-private fun isMarkdownTableStart(lines: List<String>, index: Int): Boolean {
-    if (index + 1 >= lines.size) return false
-    val header = lines[index].trim()
-    val separator = lines[index + 1].trim()
-    if (!header.contains("|") || !separator.contains("|")) return false
-    val separatorCells = splitMarkdownTableRow(separator)
-    return separatorCells.isNotEmpty() && separatorCells.all { cell ->
-        val value = cell.trim()
-        value.count { it == '-' } >= 3 && value.all { it == '-' || it == ':' || it.isWhitespace() }
-    }
-}
-
-private fun parseMarkdownTable(lines: List<String>, startIndex: Int): Pair<MarkdownTable, Int> {
-    val headers = splitMarkdownTableRow(lines[startIndex])
-    val rows = mutableListOf<List<String>>()
-    var index = startIndex + 2
-    while (index < lines.size) {
-        val line = lines[index]
-        if (line.isBlank() || !line.contains("|")) break
-        rows += splitMarkdownTableRow(line)
-        index += 1
-    }
-    return MarkdownTable(headers = headers, rows = rows) to index
-}
-
-private fun splitMarkdownTableRow(line: String): List<String> =
-    line.trim().trim('|').split('|').map { it.trim() }
-
 @Composable
-private fun MarkdownTableBlock(
-    table: MarkdownTable,
+private fun MarkdownNodeChildren(
+    parent: Node,
     color: Color,
     onLookupWord: (String) -> Unit,
 ) {
-    val columnCount = ((listOf(table.headers.size) + table.rows.map { it.size }).maxOrNull() ?: 0).coerceAtLeast(1)
+    parent.childNodes().forEach { child ->
+        MarkdownBlockNode(
+            node = child,
+            color = color,
+            onLookupWord = onLookupWord,
+        )
+    }
+}
+
+@Composable
+private fun MarkdownBlockNode(
+    node: Node,
+    color: Color,
+    onLookupWord: (String) -> Unit,
+) {
+    when (node) {
+        is Paragraph -> {
+            MarkdownInlineText(
+                annotated = remember(node) { markdownInlineFromChildren(node) },
+                style = MaterialTheme.typography.bodyMedium,
+                color = color,
+                onLookupWord = onLookupWord,
+            )
+        }
+
+        is Heading -> {
+            MarkdownInlineText(
+                annotated = remember(node) { markdownInlineFromChildren(node) },
+                style = when (node.level.coerceIn(1, 3)) {
+                    1 -> MaterialTheme.typography.titleMedium
+                    2 -> MaterialTheme.typography.titleSmall
+                    else -> MaterialTheme.typography.bodyLarge
+                },
+                color = color,
+                fontWeight = FontWeight.Bold,
+                onLookupWord = onLookupWord,
+            )
+        }
+
+        is BlockQuote -> {
+            Column(
+                modifier = Modifier
+                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                node.childNodes().forEach { child ->
+                    MarkdownBlockNode(
+                        node = child,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        onLookupWord = onLookupWord,
+                    )
+                }
+            }
+        }
+
+        is BulletList -> {
+            MarkdownListBlock(
+                list = node,
+                color = color,
+                onLookupWord = onLookupWord,
+            )
+        }
+
+        is OrderedList -> {
+            MarkdownListBlock(
+                list = node,
+                color = color,
+                onLookupWord = onLookupWord,
+            )
+        }
+
+        is FencedCodeBlock -> {
+            if (node.info.trim().lowercase(Locale.US).startsWith("mermaid")) {
+                MermaidBlock(node.literal)
+            } else {
+                MarkdownCodeBlock(node.literal)
+            }
+        }
+
+        is IndentedCodeBlock -> {
+            MarkdownCodeBlock(node.literal)
+        }
+
+        is TableBlock -> {
+            MarkdownTableBlock(
+                table = node,
+                color = color,
+                onLookupWord = onLookupWord,
+            )
+        }
+
+        is ThematicBreak -> HorizontalDivider()
+
+        else -> {
+            if (node.firstChild != null) {
+                MarkdownNodeChildren(
+                    parent = node,
+                    color = color,
+                    onLookupWord = onLookupWord,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MarkdownListBlock(
+    list: Node,
+    color: Color,
+    onLookupWord: (String) -> Unit,
+) {
+    val startNumber = (list as? OrderedList)?.markerStartNumber ?: 1
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        list.childNodes().filterIsInstance<ListItem>().forEachIndexed { index, item ->
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = if (list is OrderedList) "${startNumber + index}." else "•",
+                    color = color,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    item.childNodes().forEach { child ->
+                        MarkdownBlockNode(
+                            node = child,
+                            color = color,
+                            onLookupWord = onLookupWord,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MarkdownTableBlock(
+    table: TableBlock,
+    color: Color,
+    onLookupWord: (String) -> Unit,
+) {
+    val rows = remember(table) { table.toMarkdownRows() }
+    val columnCount = (rows.maxOfOrNull { it.size } ?: 0).coerceAtLeast(1)
     Surface(
         shape = RoundedCornerShape(8.dp),
         color = MaterialTheme.colorScheme.surface,
@@ -1685,19 +1753,11 @@ private fun MarkdownTableBlock(
                 .horizontalScroll(rememberScrollState())
                 .padding(1.dp),
         ) {
-            MarkdownTableRow(
-                cells = table.headers,
-                columnCount = columnCount,
-                color = color,
-                header = true,
-                onLookupWord = onLookupWord,
-            )
-            table.rows.forEach { row ->
+            rows.forEach { row ->
                 MarkdownTableRow(
                     cells = row,
                     columnCount = columnCount,
                     color = color,
-                    header = false,
                     onLookupWord = onLookupWord,
                 )
             }
@@ -1707,32 +1767,121 @@ private fun MarkdownTableBlock(
 
 @Composable
 private fun MarkdownTableRow(
-    cells: List<String>,
+    cells: List<MarkdownTableCell>,
     columnCount: Int,
     color: Color,
-    header: Boolean,
     onLookupWord: (String) -> Unit,
 ) {
     Row {
         repeat(columnCount) { index ->
+            val cell = cells.getOrNull(index)
+            val header = cell?.header == true
             Box(
                 modifier = Modifier
-                    .widthIn(min = 112.dp, max = 190.dp)
+                    .width(150.dp)
                     .border(1.dp, MaterialTheme.colorScheme.outlineVariant)
                     .background(if (header) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface)
                     .padding(horizontal = 9.dp, vertical = 8.dp),
             ) {
                 MarkdownInlineText(
-                    markdown = cells.getOrElse(index) { "" },
+                    annotated = cell?.text ?: AnnotatedString(""),
                     style = MaterialTheme.typography.bodySmall,
                     color = if (header) MaterialTheme.colorScheme.onSurfaceVariant else color,
                     fontWeight = if (header) FontWeight.Bold else null,
+                    textAlign = cell?.alignment.toTextAlign(),
+                    modifier = Modifier.fillMaxWidth(),
                     onLookupWord = onLookupWord,
                 )
             }
         }
     }
 }
+
+private data class MarkdownTableCell(
+    val text: AnnotatedString,
+    val header: Boolean,
+    val alignment: TableCell.Alignment?,
+)
+
+private fun TableBlock.toMarkdownRows(): List<List<MarkdownTableCell>> {
+    val rows = mutableListOf<List<MarkdownTableCell>>()
+    childNodes().forEach { section ->
+        val header = section is TableHead
+        if (section !is TableHead && section !is TableBody) return@forEach
+        section.childNodes().filterIsInstance<TableRow>().forEach { row ->
+            rows += row.childNodes().filterIsInstance<TableCell>().map { cell ->
+                MarkdownTableCell(
+                    text = markdownInlineFromChildren(cell),
+                    header = header,
+                    alignment = cell.alignment,
+                )
+            }
+        }
+    }
+    return rows
+}
+
+private fun TableCell.Alignment?.toTextAlign(): TextAlign =
+    when (this) {
+        TableCell.Alignment.LEFT -> TextAlign.Start
+        TableCell.Alignment.CENTER -> TextAlign.Center
+        TableCell.Alignment.RIGHT -> TextAlign.End
+        null -> TextAlign.Start
+    }
+
+private fun markdownInlineFromChildren(parent: Node): AnnotatedString =
+    buildAnnotatedString {
+        parent.childNodes().forEach { appendMarkdownInline(it) }
+    }
+
+private fun AnnotatedString.Builder.appendMarkdownInline(node: Node) {
+    when (node) {
+        is MarkdownTextNode -> append(node.literal)
+        is Code -> {
+            pushStyle(
+                SpanStyle(
+                    fontFamily = FontFamily.Monospace,
+                    background = Color.Black.copy(alpha = 0.08f),
+                ),
+            )
+            append(node.literal)
+            pop()
+        }
+        is Emphasis -> {
+            pushStyle(SpanStyle(fontStyle = FontStyle.Italic))
+            node.childNodes().forEach { appendMarkdownInline(it) }
+            pop()
+        }
+        is StrongEmphasis -> {
+            pushStyle(SpanStyle(fontWeight = FontWeight.Bold))
+            node.childNodes().forEach { appendMarkdownInline(it) }
+            pop()
+        }
+        is Link -> {
+            pushStyle(
+                SpanStyle(
+                    color = Color(0xFF3E8E0F),
+                    textDecoration = TextDecoration.Underline,
+                ),
+            )
+            node.childNodes().forEach { appendMarkdownInline(it) }
+            pop()
+        }
+        is SoftLineBreak -> append(" ")
+        is HardLineBreak -> append("\n")
+        is HtmlInline -> append(node.literal)
+        else -> node.childNodes().forEach { appendMarkdownInline(it) }
+    }
+}
+
+private fun Node.childNodes(): List<Node> =
+    buildList {
+        var child = firstChild
+        while (child != null) {
+            add(child)
+            child = child.next
+        }
+    }
 
 @Composable
 private fun MermaidBlock(code: String) {
@@ -1830,60 +1979,6 @@ private fun MarkdownCodeBlock(code: String) {
         )
     }
 }
-
-private fun markdownInline(text: String): AnnotatedString =
-    buildAnnotatedString {
-        var index = 0
-        while (index < text.length) {
-            when {
-                text.startsWith("**", index) -> {
-                    val end = text.indexOf("**", startIndex = index + 2)
-                    if (end > index) {
-                        pushStyle(SpanStyle(fontWeight = FontWeight.Bold))
-                        append(text.substring(index + 2, end))
-                        pop()
-                        index = end + 2
-                    } else {
-                        append(text[index])
-                        index += 1
-                    }
-                }
-                text.startsWith("`", index) -> {
-                    val end = text.indexOf("`", startIndex = index + 1)
-                    if (end > index) {
-                        pushStyle(
-                            SpanStyle(
-                                fontFamily = FontFamily.Monospace,
-                                background = Color.Black.copy(alpha = 0.08f),
-                            ),
-                        )
-                        append(text.substring(index + 1, end))
-                        pop()
-                        index = end + 1
-                    } else {
-                        append(text[index])
-                        index += 1
-                    }
-                }
-                text.startsWith("*", index) -> {
-                    val end = text.indexOf("*", startIndex = index + 1)
-                    if (end > index) {
-                        pushStyle(SpanStyle(fontStyle = FontStyle.Italic))
-                        append(text.substring(index + 1, end))
-                        pop()
-                        index = end + 1
-                    } else {
-                        append(text[index])
-                        index += 1
-                    }
-                }
-                else -> {
-                    append(text[index])
-                    index += 1
-                }
-            }
-        }
-    }
 
 @Composable
 private fun ChatInputBar(
