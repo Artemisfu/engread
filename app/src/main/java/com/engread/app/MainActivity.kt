@@ -39,7 +39,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -90,7 +89,6 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedButton
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -108,11 +106,14 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -1913,7 +1914,6 @@ private fun ReaderScreen(
                     entry = entry,
                     stackDepth = wordStack.size,
                     ttsAccent = ttsAccent,
-                    availableTtsAccents = ttsVoices.keys,
                     onClose = { closeTopWordCard() },
                     onLookupWord = { lookupWord(it) },
                     onTtsAccentChange = { ttsAccent = it },
@@ -2464,7 +2464,7 @@ private suspend fun PointerInputScope.detectReaderTextGestures(
                 }
                 return@awaitEachGesture
             }
-            val wordLookupDelayMillis = 1_000L
+            val wordLookupDelayMillis = 700L
             var releasedBeforeLookup = false
             withTimeoutOrNull(wordLookupDelayMillis) {
                 while (true) {
@@ -2972,13 +2972,23 @@ private fun WordLookupPanel(
     entry: WordEntry,
     stackDepth: Int,
     ttsAccent: TtsAccent,
-    availableTtsAccents: Set<TtsAccent>,
     onClose: () -> Unit,
     onLookupWord: (String) -> Unit,
     onTtsAccentChange: (TtsAccent) -> Unit,
     onSpeak: () -> Unit,
 ) {
-    val panelHeight = (LocalConfiguration.current.screenHeightDp * 0.38f).dp
+    val screenHeightDp = LocalConfiguration.current.screenHeightDp.toFloat().coerceAtLeast(1f)
+    val screenHeightPx = with(LocalDensity.current) {
+        screenHeightDp.dp.toPx().coerceAtLeast(1f)
+    }
+    val minPanelFraction = 0.38f
+    val maxPanelFraction = ((screenHeightDp - 112f) / screenHeightDp).coerceIn(minPanelFraction, 0.88f)
+    var panelFraction by rememberSaveable(entry.word) { mutableStateOf(minPanelFraction) }
+    LaunchedEffect(maxPanelFraction) {
+        panelFraction = panelFraction.coerceIn(minPanelFraction, maxPanelFraction)
+    }
+    val panelHeight = (screenHeightDp * panelFraction).dp
+    val nextAccent = if (ttsAccent == TtsAccent.US) TtsAccent.UK else TtsAccent.US
     Surface(
         tonalElevation = 6.dp,
         shadowElevation = 8.dp,
@@ -2989,18 +2999,47 @@ private fun WordLookupPanel(
             .navigationBarsPadding(),
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp),
+            modifier = Modifier
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 18.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(22.dp)
+                    .pointerInput(maxPanelFraction, screenHeightPx) {
+                        detectDragGestures { change, dragAmount ->
+                            panelFraction = (panelFraction - dragAmount.y / screenHeightPx)
+                                .coerceIn(minPanelFraction, maxPanelFraction)
+                            change.consume()
+                        }
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(44.dp)
+                        .height(5.dp)
+                        .clip(RoundedCornerShape(99.dp))
+                        .background(MaterialTheme.colorScheme.outlineVariant),
+                )
+            }
             Row(
-                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Top,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                Column(modifier = Modifier.weight(1f)) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
                     LookupText(
                         text = entry.word,
-                        style = MaterialTheme.typography.titleLarge,
+                        style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.Black,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
                         onLookupWord = onLookupWord,
                     )
                     Text(
@@ -3013,63 +3052,54 @@ private fun WordLookupPanel(
                         color = MaterialTheme.colorScheme.primary,
                     )
                 }
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    TtsAccent.entries.forEach { accent ->
-                        FilterChip(
-                            selected = ttsAccent == accent,
-                            onClick = { onTtsAccentChange(accent) },
-                            enabled = true,
-                            label = { Text(accent.label) },
-                        )
-                    }
-                    IconButton(onClick = onSpeak) {
-                        Icon(Icons.Filled.PlayArrow, contentDescription = "播放读音")
-                    }
-                }
                 IconButton(onClick = onClose) {
                     Icon(Icons.Filled.Close, contentDescription = "关闭")
                 }
             }
-            HorizontalDivider()
-            Column(
-                modifier = Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
+                AssistChip(
+                    onClick = { onTtsAccentChange(nextAccent) },
+                    label = { Text("${ttsAccent.label} · 切换") },
+                )
+                IconButton(onClick = onSpeak) {
+                    Icon(Icons.Filled.PlayArrow, contentDescription = "播放读音")
+                }
+            }
+            HorizontalDivider()
+            WordInfoSection(
+                title = "释义",
+                text = entry.meaning,
+                onLookupWord = onLookupWord,
+            )
+            if (entry.root.isNotBlank()) {
                 WordInfoSection(
-                    title = "释义",
-                    text = entry.meaning,
+                    title = "词根",
+                    text = entry.root,
                     onLookupWord = onLookupWord,
                 )
-                if (entry.root.isNotBlank()) {
-                    WordInfoSection(
-                        title = "词根",
-                        text = entry.root,
-                        onLookupWord = onLookupWord,
-                    )
-                } else if (entry.detailsLoading) {
-                    WordInfoSkeleton(title = "词根")
-                }
-                if (entry.cognates.isNotEmpty()) {
-                    WordListSection(
-                        title = "同源词",
-                        words = entry.cognates,
-                        onLookupWord = onLookupWord,
-                    )
-                } else if (entry.detailsLoading) {
-                    WordChipListSkeleton(title = "同源词")
-                }
-                if (entry.synonyms.isNotEmpty()) {
-                    WordListSection(
-                        title = "近义词",
-                        words = entry.synonyms,
-                        onLookupWord = onLookupWord,
-                    )
-                } else if (entry.detailsLoading) {
-                    WordChipListSkeleton(title = "近义词")
-                }
+            } else if (entry.detailsLoading) {
+                WordInfoSkeleton(title = "词根")
+            }
+            if (entry.cognates.isNotEmpty()) {
+                WordListSection(
+                    title = "同源词",
+                    words = entry.cognates,
+                    onLookupWord = onLookupWord,
+                )
+            } else if (entry.detailsLoading) {
+                WordChipListSkeleton(title = "同源词")
+            }
+            if (entry.synonyms.isNotEmpty()) {
+                WordListSection(
+                    title = "近义词",
+                    words = entry.synonyms,
+                    onLookupWord = onLookupWord,
+                )
+            } else if (entry.detailsLoading) {
+                WordChipListSkeleton(title = "近义词")
             }
         }
     }
@@ -3207,6 +3237,8 @@ private fun LookupText(
     modifier: Modifier = Modifier,
     fontWeight: FontWeight? = null,
     color: androidx.compose.ui.graphics.Color = androidx.compose.ui.graphics.Color.Unspecified,
+    maxLines: Int = Int.MAX_VALUE,
+    overflow: TextOverflow = TextOverflow.Clip,
     onLookupWord: (String) -> Unit,
 ) {
     var layoutResult by remember(text) { mutableStateOf<TextLayoutResult?>(null) }
@@ -3215,6 +3247,8 @@ private fun LookupText(
         style = style,
         fontWeight = fontWeight,
         color = color,
+        maxLines = maxLines,
+        overflow = overflow,
         modifier = modifier.pointerInput(text) {
             detectTapGestures(
                 onLongPress = { position ->
@@ -4111,34 +4145,34 @@ private fun EmptyNotes(modifier: Modifier) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SwipeDeleteContainer(
     enabled: Boolean = true,
     onDelete: () -> Unit,
     content: @Composable () -> Unit,
 ) {
-    val density = LocalDensity.current
-    val deleteWidth = 88.dp
-    val deleteWidthPx = with(density) { deleteWidth.toPx() }
-    var offsetX by remember { mutableStateOf(0f) }
-    Box(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .matchParentSize()
-                .clip(RoundedCornerShape(8.dp))
-                .background(MaterialTheme.colorScheme.errorContainer),
-            horizontalArrangement = Arrangement.End,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            if (enabled && value == SwipeToDismissBoxValue.EndToStart) {
+                onDelete()
+            }
+            false
+        },
+    )
+    SwipeToDismissBox(
+        state = dismissState,
+        enableDismissFromStartToEnd = false,
+        enableDismissFromEndToStart = enabled,
+        gesturesEnabled = enabled,
+        backgroundContent = {
             Box(
                 modifier = Modifier
-                    .width(deleteWidth)
-                    .fillMaxHeight()
-                    .clickable(enabled = enabled) {
-                        offsetX = 0f
-                        onDelete()
-                    },
-                contentAlignment = Alignment.Center,
+                    .fillMaxSize()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.errorContainer)
+                    .padding(end = 30.dp),
+                contentAlignment = Alignment.CenterEnd,
             ) {
                 Icon(
                     Icons.Filled.Delete,
@@ -4146,29 +4180,13 @@ private fun SwipeDeleteContainer(
                     tint = MaterialTheme.colorScheme.onErrorContainer,
                 )
             }
-        }
-        Box(
-            modifier = Modifier
-                .offset { IntOffset(offsetX.roundToInt(), 0) }
-                .pointerInput(enabled) {
-                    if (!enabled) return@pointerInput
-                    detectDragGestures(
-                        onDragEnd = {
-                            offsetX = if (offsetX < -deleteWidthPx * 0.42f) -deleteWidthPx else 0f
-                        },
-                        onDragCancel = {
-                            offsetX = 0f
-                        },
-                        onDrag = { change, dragAmount ->
-                            offsetX = (offsetX + dragAmount.x).coerceIn(-deleteWidthPx, 0f)
-                            if (dragAmount.x != 0f) change.consume()
-                        },
-                    )
-                },
-        ) {
-            content()
-        }
-    }
+        },
+        content = {
+            Box(modifier = Modifier.fillMaxWidth()) {
+                content()
+            }
+        },
+    )
 }
 
 @Composable
