@@ -221,12 +221,12 @@ private object EpubParser {
     )
 
     fun parse(bytes: ByteArray, cacheDir: File): ParsedEpub {
-        val strictResult = runCatching { parseWithEpub4j(bytes) }
-        return strictResult.getOrElse { strictError ->
-            runCatching { parseLenient(bytes, cacheDir) }
-                .getOrElse { lenientError ->
-                    strictError.addSuppressed(lenientError)
-                    throw strictError
+        val lenientResult = runCatching { parseLenient(bytes, cacheDir) }
+        return lenientResult.getOrElse { lenientError ->
+            runCatching { parseWithEpub4j(bytes) }
+                .getOrElse { strictError ->
+                    lenientError.addSuppressed(strictError)
+                    throw lenientError
                 }
         }
     }
