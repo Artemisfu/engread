@@ -73,6 +73,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoStories
 import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
@@ -111,7 +112,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -360,6 +360,13 @@ private val AppScreenSaver = Saver<AppScreen, String>(
     },
 )
 
+private data class UndoNotice(
+    val id: String = UUID.randomUUID().toString(),
+    val message: String,
+    val actionLabel: String = "恢复",
+    val onAction: suspend () -> Unit,
+)
+
 @Composable
 private fun EngReadApp() {
     val context = LocalContext.current
@@ -379,6 +386,7 @@ private fun EngReadApp() {
     var suggestingChatBookId by remember { mutableStateOf<String?>(null) }
     var preferredChatBookId by rememberSaveable { mutableStateOf("") }
     var chatSuggestionsByBook by remember { mutableStateOf<Map<String, List<String>>>(emptyMap()) }
+    var undoNotices by remember { mutableStateOf<List<UndoNotice>>(emptyList()) }
     var lastHomeBackAt by remember { mutableStateOf(0L) }
 
     fun refreshAll() {
@@ -394,18 +402,29 @@ private fun EngReadApp() {
     }
 
     fun showUndoMessage(message: String, onRestore: suspend () -> Unit) {
-        scope.launch {
-            val result = snackbarHostState.showSnackbar(
-                message = message,
-                actionLabel = "恢复",
-                withDismissAction = true,
-            )
-            if (result == SnackbarResult.ActionPerformed) {
-                withContext(Dispatchers.IO) { onRestore() }
-                refreshAll()
-                snackbarHostState.showSnackbar("已恢复")
+        undoNotices = undoNotices + UndoNotice(message = message, onAction = onRestore)
+    }
+
+    fun dismissUndoNotice(id: String) {
+        undoNotices = undoNotices.filterNot { it.id == id }
+    }
+
+    fun openReader(book: Book, paragraphIndex: Int?) {
+        val targetParagraph = paragraphIndex?.coerceIn(0, (book.paragraphs.size - 1).coerceAtLeast(0))
+        if (targetParagraph != null) {
+            val now = System.currentTimeMillis()
+            books = books.map { item ->
+                if (item.id == book.id) {
+                    item.copy(lastReadParagraph = targetParagraph, updatedAt = now)
+                } else {
+                    item
+                }
+            }
+            scope.launch(Dispatchers.IO) {
+                repository.updateProgress(book.id, targetParagraph)
             }
         }
+        screen = AppScreen.Reader(book.id)
     }
 
     BackHandler {
@@ -620,7 +639,7 @@ private fun EngReadApp() {
                             ),
                         )
                     },
-                    onOpenBook = { screen = AppScreen.Reader(it.id) },
+                    onOpenBook = { openReader(it, null) },
                     onDeleteBook = { book ->
                         scope.launch {
                             withContext(Dispatchers.IO) { repository.deleteBook(book.id) }
@@ -730,14 +749,16 @@ private fun EngReadApp() {
                             }
                         }
                     },
-                    onDeleteNotes = { selectedNotes ->
+                    onDeleteSelectedItems = { selectedNotes, selectedEntries ->
                         scope.launch {
                             withContext(Dispatchers.IO) {
                                 selectedNotes.forEach { repository.deleteNote(it.id) }
+                                selectedEntries.forEach { repository.deleteLookupHistory(it.id) }
                             }
                             refreshAll()
-                            showUndoMessage("已删除 ${selectedNotes.size} 条笔记") {
+                            showUndoMessage("已删除 ${selectedNotes.size + selectedEntries.size} 条记录") {
                                 selectedNotes.forEach { repository.restoreNote(it) }
+                                selectedEntries.forEach { repository.restoreLookupHistory(it) }
                             }
                         }
                     },
@@ -762,6 +783,11 @@ private fun EngReadApp() {
                             }
                         }
                     },
+                    onOpenSource = { bookId, paragraphIndex ->
+                        books.firstOrNull { it.id == bookId }?.let { book ->
+                            openReader(book, paragraphIndex)
+                        } ?: showMessage("找不到原书")
+                    },
                 )
 
                 AppScreen.Chat -> ChatScreen(
@@ -781,23 +807,7 @@ private fun EngReadApp() {
                     },
                     onSendMessage = { book, text -> sendBookChatMessage(book, text) },
                     onRefreshSuggestions = { book -> requestChatSuggestions(book) },
-                    onOpenReader = { book, paragraphIndex ->
-                        val targetParagraph = paragraphIndex?.coerceIn(0, (book.paragraphs.size - 1).coerceAtLeast(0))
-                        if (targetParagraph != null) {
-                            val now = System.currentTimeMillis()
-                            books = books.map { item ->
-                                if (item.id == book.id) {
-                                    item.copy(lastReadParagraph = targetParagraph, updatedAt = now)
-                                } else {
-                                    item
-                                }
-                            }
-                            scope.launch(Dispatchers.IO) {
-                                repository.updateProgress(book.id, targetParagraph)
-                            }
-                        }
-                        screen = AppScreen.Reader(book.id)
-                    },
+                    onOpenReader = { book, paragraphIndex -> openReader(book, paragraphIndex) },
                     onAddLookupHistory = { activeBook, paragraphIndex, type, sourceText, resultText, phonetic ->
                         scope.launch(Dispatchers.IO) {
                             repository.addLookupHistory(
@@ -835,6 +845,80 @@ private fun EngReadApp() {
                     .navigationBarsPadding()
                     .padding(16.dp),
             )
+            UndoNoticeHost(
+                notices = undoNotices,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(16.dp),
+                onDismiss = { dismissUndoNotice(it) },
+                onAction = { notice ->
+                    dismissUndoNotice(notice.id)
+                    scope.launch {
+                        withContext(Dispatchers.IO) { notice.onAction() }
+                        refreshAll()
+                        showMessage("已恢复")
+                    }
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun UndoNoticeHost(
+    notices: List<UndoNotice>,
+    modifier: Modifier = Modifier,
+    onDismiss: (String) -> Unit,
+    onAction: (UndoNotice) -> Unit,
+) {
+    if (notices.isEmpty()) return
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        notices.forEach { notice ->
+            LaunchedEffect(notice.id) {
+                delay(6_000)
+                onDismiss(notice.id)
+            }
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.inverseSurface,
+                tonalElevation = 6.dp,
+                shadowElevation = 6.dp,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    modifier = Modifier.padding(start = 16.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = notice.message,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.inverseOnSurface,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = { onAction(notice) }) {
+                        Text(
+                            text = notice.actionLabel,
+                            color = MaterialTheme.colorScheme.inversePrimary,
+                        )
+                    }
+                    IconButton(
+                        onClick = { onDismiss(notice.id) },
+                        modifier = Modifier.size(32.dp),
+                    ) {
+                        Icon(
+                            Icons.Filled.Close,
+                            contentDescription = "关闭",
+                            tint = MaterialTheme.colorScheme.inverseOnSurface,
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -1581,53 +1665,62 @@ private fun ChatMessageBubble(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (fromUser) Arrangement.End else Arrangement.Start,
     ) {
-        Surface(
-            shape = RoundedCornerShape(8.dp),
-            color = if (fromUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
-            modifier = Modifier
-                .fillMaxWidth(0.86f)
-                .pointerInput(message.id) {
+        Column(
+            modifier = Modifier.fillMaxWidth(0.86f),
+            horizontalAlignment = if (fromUser) Alignment.End else Alignment.Start,
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = if (fromUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+                modifier = Modifier.pointerInput(message.id) {
                     detectTapGestures(onTap = { detailsVisible = !detailsVisible })
                 },
-        ) {
-            Column(
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                if (!fromUser) {
-                    Text(
-                        text = "EngRead",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
-                MarkdownText(
-                    markdown = message.content,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    onLookupWord = onLookupWord,
-                    onOpenAnchor = onOpenAnchor,
-                )
-                if (detailsVisible) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    if (!fromUser) {
                         Text(
-                            text = formatChatMessageTime(message.createdAt),
+                            text = "EngRead",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontWeight = FontWeight.Bold,
                         )
-                        TextButton(
-                            onClick = {
-                                clipboard.setText(AnnotatedString(message.content))
-                                Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
-                            },
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                        ) {
-                            Text("复制")
-                        }
+                    }
+                    MarkdownText(
+                        markdown = message.content,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        onLookupWord = onLookupWord,
+                        onOpenAnchor = onOpenAnchor,
+                    )
+                }
+            }
+            if (detailsVisible) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 4.dp),
+                    horizontalArrangement = if (fromUser) Arrangement.End else Arrangement.Start,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = formatChatMessageTime(message.createdAt),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                    )
+                    IconButton(
+                        onClick = {
+                            clipboard.setText(AnnotatedString(message.content))
+                            Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier.size(30.dp),
+                    ) {
+                        Icon(
+                            Icons.Filled.ContentCopy,
+                            contentDescription = "复制",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                            modifier = Modifier.size(16.dp),
+                        )
                     }
                 }
             }
@@ -4985,9 +5078,10 @@ private fun NotesScreen(
     onExport: () -> Unit,
     onUpdateNote: (ReaderNote, String) -> Unit,
     onDeleteNote: (ReaderNote) -> Unit,
-    onDeleteNotes: (List<ReaderNote>) -> Unit,
+    onDeleteSelectedItems: (List<ReaderNote>, List<LookupHistoryEntry>) -> Unit,
     onDeleteLookupHistory: (List<LookupHistoryEntry>) -> Unit,
     onClearHistory: () -> Unit,
+    onOpenSource: (String, Int) -> Unit,
 ) {
     var editingNote by remember { mutableStateOf<ReaderNote?>(null) }
     var deletingNote by remember { mutableStateOf<ReaderNote?>(null) }
@@ -5158,6 +5252,7 @@ private fun NotesScreen(
                                         }
                                     },
                                     onEdit = { editingNote = note },
+                                    onOpenSource = { onOpenSource(note.bookId, note.paragraphIndex) },
                                     onDelete = { deletingNote = note },
                                 )
                             }
@@ -5179,6 +5274,7 @@ private fun NotesScreen(
                                             selectedItemIds.remove(timelineItem.id)
                                         }
                                     },
+                                    onOpenSource = { onOpenSource(timelineItem.item.bookId, timelineItem.item.paragraphIndex) },
                                     onDelete = { onDeleteLookupHistory(listOf(timelineItem.item)) },
                                 )
                             }
@@ -5236,8 +5332,7 @@ private fun NotesScreen(
                 Button(
                     onClick = {
                         batchDeleteConfirmOpen = false
-                        if (selectedNotes.isNotEmpty()) onDeleteNotes(selectedNotes)
-                        if (selectedLookupEntries.isNotEmpty()) onDeleteLookupHistory(selectedLookupEntries)
+                        onDeleteSelectedItems(selectedNotes, selectedLookupEntries)
                         selectedItemIds.clear()
                         batchDeleteMode = false
                     },
@@ -5367,7 +5462,6 @@ private fun SwipeDeleteContainer(
     val deleteWidthPx = with(density) { deleteWidth.toPx() }
     var offsetX by remember { mutableStateOf(0f) }
     val deleteArmed = offsetX <= -deleteWidthPx * 0.9f
-    val currentDeleteArmed by rememberUpdatedState(deleteArmed)
     LaunchedEffect(deleteArmed) {
         if (deleteArmed) {
             delay(5_000)
@@ -5417,12 +5511,16 @@ private fun SwipeDeleteContainer(
                 .pointerInput(enabled, deleteWidthPx) {
                     if (!enabled) return@pointerInput
                     var shouldDelete = false
+                    var wasArmedAtDragStart = false
                     detectHorizontalDragGestures(
-                        onDragStart = { shouldDelete = false },
+                        onDragStart = {
+                            shouldDelete = false
+                            wasArmedAtDragStart = offsetX <= -deleteWidthPx * 0.9f
+                        },
                         onHorizontalDrag = { change, dragAmount ->
                             val nextOffset = (offsetX + dragAmount)
                                 .coerceIn(-deleteWidthPx * 1.28f, 0f)
-                            if (currentDeleteArmed && nextOffset <= -deleteWidthPx * 1.12f) {
+                            if (wasArmedAtDragStart && nextOffset <= -deleteWidthPx * 1.12f) {
                                 shouldDelete = true
                             }
                             offsetX = nextOffset
@@ -5432,8 +5530,14 @@ private fun SwipeDeleteContainer(
                             if (shouldDelete) {
                                 offsetX = 0f
                                 onDelete()
+                            } else if (wasArmedAtDragStart) {
+                                offsetX = if (offsetX > -deleteWidthPx * 0.45f) {
+                                    0f
+                                } else {
+                                    -deleteWidthPx
+                                }
                             } else {
-                                offsetX = if (offsetX <= -deleteWidthPx * 0.72f) {
+                                offsetX = if (offsetX < -1f) {
                                     -deleteWidthPx
                                 } else {
                                     0f
@@ -5441,7 +5545,7 @@ private fun SwipeDeleteContainer(
                             }
                         },
                         onDragCancel = {
-                            offsetX = if (currentDeleteArmed) -deleteWidthPx else 0f
+                            offsetX = if (wasArmedAtDragStart || offsetX < -1f) -deleteWidthPx else 0f
                         },
                     )
                 },
@@ -5462,6 +5566,7 @@ private fun NoteCard(
     onToggleExpanded: () -> Unit,
     onSelectedChange: (Boolean) -> Unit,
     onEdit: () -> Unit,
+    onOpenSource: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val showDetails = expanded || displayMode == NotesDisplayMode.DETAIL
@@ -5510,6 +5615,9 @@ private fun NoteCard(
                             modifier = Modifier.weight(1f),
                         )
                         if (!batchDeleteMode) {
+                            IconButton(onClick = onOpenSource) {
+                                Icon(Icons.Filled.AutoStories, contentDescription = "回原文")
+                            }
                             IconButton(onClick = onEdit) {
                                 Icon(Icons.Filled.Edit, contentDescription = "编辑")
                             }
@@ -5659,6 +5767,7 @@ private fun LookupHistoryCard(
     selected: Boolean,
     onToggleExpanded: () -> Unit,
     onSelectedChange: (Boolean) -> Unit,
+    onOpenSource: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val showDetails = expanded || displayMode == NotesDisplayMode.DETAIL
@@ -5705,6 +5814,11 @@ private fun LookupHistoryCard(
                             color = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.weight(1f),
                         )
+                        if (!batchDeleteMode) {
+                            IconButton(onClick = onOpenSource) {
+                                Icon(Icons.Filled.AutoStories, contentDescription = "回原文")
+                            }
+                        }
                     }
                     Text(
                         text = "${item.bookTitle} · 第 ${item.paragraphIndex + 1} 段 · ${formatTimestamp(item.updatedAt)}",
