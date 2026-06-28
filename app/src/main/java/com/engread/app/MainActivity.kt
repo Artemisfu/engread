@@ -1,6 +1,8 @@
 package com.engread.app
 
 import android.app.Activity
+import android.content.Context
+import android.content.Intent
 import android.view.KeyEvent
 import android.net.Uri
 import android.os.Bundle
@@ -8,6 +10,7 @@ import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.speech.tts.Voice
 import android.media.AudioAttributes
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -77,6 +80,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedButton
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -839,6 +843,47 @@ private data class ChapterTocItem(
     val progressAnchor: ReaderPageAnchor?,
 )
 
+private enum class TtsAccent(
+    val label: String,
+    val locale: Locale,
+) {
+    US("美音", Locale.US),
+    UK("英音", Locale.UK),
+}
+
+private fun TextToSpeech.availableLocalEnglishAccents(): Map<TtsAccent, Voice?> =
+    TtsAccent.entries.associateWith { accent ->
+        findLocalEnglishVoice(accent)
+    }.filter { (accent, voice) ->
+        voice != null || isLanguageInstalled(accent.locale)
+    }
+
+private fun TextToSpeech.findLocalEnglishVoice(accent: TtsAccent): Voice? {
+    val targetCountry = accent.locale.country.uppercase(Locale.ROOT)
+    return voices
+        ?.asSequence()
+        ?.filter { voice ->
+            !voice.isNetworkConnectionRequired &&
+                voice.locale.language.equals("en", ignoreCase = true) &&
+                voice.locale.country.equals(targetCountry, ignoreCase = true)
+        }
+        ?.sortedWith(
+            compareByDescending<Voice> { it.quality }
+                .thenBy { it.latency }
+                .thenBy { it.name },
+        )
+        ?.firstOrNull()
+}
+
+private fun TextToSpeech.isLanguageInstalled(locale: Locale): Boolean =
+    isLanguageAvailable(locale) >= TextToSpeech.LANG_AVAILABLE
+
+private fun Context.installedTtsEnginePackages(): List<String> =
+    packageManager
+        .queryIntentServices(Intent(TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE), 0)
+        .mapNotNull { it.serviceInfo?.packageName }
+        .distinct()
+
 private fun ReaderPageAnchor.isAfter(other: ReaderPageAnchor): Boolean =
     paragraphIndex > other.paragraphIndex ||
         (paragraphIndex == other.paragraphIndex && paragraphOffset > other.paragraphOffset)
@@ -993,6 +1038,8 @@ private fun ReaderScreen(
     var tts by remember { mutableStateOf<TextToSpeech?>(null) }
     var ttsReady by remember { mutableStateOf(false) }
     var ttsStatusText by remember { mutableStateOf("TTS 正在初始化") }
+    var ttsAccent by rememberSaveable { mutableStateOf(TtsAccent.US) }
+    var ttsVoices by remember { mutableStateOf<Map<TtsAccent, Voice?>>(emptyMap()) }
     val selectionRange = remember(selectionStart, selectionEnd) {
         val start = selectionStart
         val end = selectionEnd
@@ -1015,66 +1062,116 @@ private fun ReaderScreen(
         ttsReady = false
         ttsStatusText = "TTS 正在初始化"
         var engine: TextToSpeech? = null
+        val engineCandidates = (listOf<String?>(null) + context.installedTtsEnginePackages())
+            .distinct()
+        var engineCandidateIndex = 0
 
-        fun finishTtsInit(status: Int) {
+        fun attachProgressListener(activeEngine: TextToSpeech) {
+            activeEngine.setOnUtteranceProgressListener(
+                object : UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String?) = Unit
+
+                    override fun onDone(utteranceId: String?) = Unit
+
+                    @Deprecated("Deprecated in Java")
+                    override fun onError(utteranceId: String?) {
+                        mainHandler.post {
+                            Toast.makeText(context, "TTS 播放出错，请检查系统文字转语音设置", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+
+                    override fun onError(utteranceId: String?, errorCode: Int) {
+                        mainHandler.post {
+                            Toast.makeText(context, "TTS 播放出错：$errorCode", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                },
+            )
+        }
+
+        lateinit var startTtsEngine: (Int) -> Unit
+        lateinit var finishTtsInit: (Int) -> Unit
+
+        startTtsEngine = { index ->
+            engineCandidateIndex = index
+            ttsReady = false
+            ttsVoices = emptyMap()
+            ttsStatusText = "TTS 正在初始化"
+            engine = null
+            val packageName = engineCandidates.getOrNull(index)
+            val nextEngine = if (packageName == null) {
+                TextToSpeech(context.applicationContext) { status ->
+                    mainHandler.post { finishTtsInit(status) }
+                }
+            } else {
+                TextToSpeech(
+                    context.applicationContext,
+                    { status -> mainHandler.post { finishTtsInit(status) } },
+                    packageName,
+                )
+            }
+            engine = nextEngine
+            attachProgressListener(nextEngine)
+            tts = nextEngine
+        }
+
+        fun tryNextTtsEngineOrFail(message: String) {
+            val previousEngine = engine
+            engine = null
+            previousEngine?.shutdown()
+            val nextIndex = engineCandidateIndex + 1
+            if (nextIndex < engineCandidates.size) {
+                startTtsEngine(nextIndex)
+            } else {
+                tts = null
+                ttsReady = false
+                ttsVoices = emptyMap()
+                ttsStatusText = message
+            }
+        }
+
+        finishTtsInit = { status ->
             val activeEngine = engine
             if (activeEngine == null) {
                 mainHandler.postDelayed({ finishTtsInit(status) }, 50)
-                return
-            }
-            if (status == TextToSpeech.SUCCESS) {
+            } else if (status == TextToSpeech.SUCCESS) {
                 activeEngine.setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build(),
                 )
-                val languageStatus = activeEngine.setLanguage(Locale.US)
-                val ready = languageStatus != TextToSpeech.LANG_MISSING_DATA &&
-                    languageStatus != TextToSpeech.LANG_NOT_SUPPORTED
-                mainHandler.post {
-                    ttsReady = ready
-                    ttsStatusText = if (ready) {
-                        "TTS 已就绪"
-                    } else {
-                        "手机 TTS 缺少或不支持英文语音"
+                val availableVoices = activeEngine.availableLocalEnglishAccents()
+                if (availableVoices.isEmpty()) {
+                    tryNextTtsEngineOrFail("手机 TTS 没有本地英文语音，请在系统文字转语音中安装英文语音包")
+                } else {
+                    val nextAccent = when {
+                        ttsAccent in availableVoices.keys -> ttsAccent
+                        TtsAccent.US in availableVoices.keys -> TtsAccent.US
+                        TtsAccent.UK in availableVoices.keys -> TtsAccent.UK
+                        else -> TtsAccent.US
+                    }
+                    availableVoices[nextAccent]?.let { activeEngine.setVoice(it) }
+                        ?: activeEngine.setLanguage(nextAccent.locale)
+                    mainHandler.post {
+                        ttsVoices = availableVoices
+                        ttsAccent = nextAccent
+                        ttsReady = true
+                        ttsStatusText = "TTS 已就绪：${availableVoices.keys.joinToString(" / ") { it.label }}"
                     }
                 }
             } else {
-                ttsReady = false
-                ttsStatusText = "手机 TTS 初始化失败"
+                tryNextTtsEngineOrFail("手机 TTS 初始化失败，请在系统文字转语音中选择或安装语音引擎")
             }
         }
 
-        engine = TextToSpeech(context.applicationContext) { status ->
-            mainHandler.post { finishTtsInit(status) }
-        }
-        engine.setOnUtteranceProgressListener(
-            object : UtteranceProgressListener() {
-                override fun onStart(utteranceId: String?) = Unit
-
-                override fun onDone(utteranceId: String?) = Unit
-
-                @Deprecated("Deprecated in Java")
-                override fun onError(utteranceId: String?) {
-                    mainHandler.post {
-                        Toast.makeText(context, "TTS 播放出错，请检查系统文字转语音设置", Toast.LENGTH_SHORT).show()
-                    }
-                }
-
-                override fun onError(utteranceId: String?, errorCode: Int) {
-                    mainHandler.post {
-                        Toast.makeText(context, "TTS 播放出错：$errorCode", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            },
-        )
-        tts = engine
+        startTtsEngine(0)
         onDispose {
-            engine.stop()
-            engine.shutdown()
+            engine?.stop()
+            engine?.shutdown()
             tts = null
             ttsReady = false
+            ttsVoices = emptyMap()
         }
     }
 
@@ -1281,8 +1378,11 @@ private fun ReaderScreen(
                 WordLookupPanel(
                     entry = entry,
                     stackDepth = wordStack.size,
+                    ttsAccent = ttsAccent,
+                    availableTtsAccents = ttsVoices.keys,
                     onClose = { closeTopWordCard() },
                     onLookupWord = { lookupWord(it) },
+                    onTtsAccentChange = { ttsAccent = it },
                     onSpeak = {
                         val engine = tts
                         when {
@@ -1294,7 +1394,29 @@ private fun ReaderScreen(
                                 Toast.makeText(context, ttsStatusText, Toast.LENGTH_SHORT).show()
                             }
 
+                            ttsAccent !in ttsVoices.keys -> {
+                                Toast.makeText(
+                                    context,
+                                    "手机未安装${ttsAccent.label}英文语音，请在系统文字转语音中安装",
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                            }
+
                             else -> {
+                                val voice = ttsVoices[ttsAccent]
+                                val ready = if (voice != null) {
+                                    engine.setVoice(voice) != TextToSpeech.ERROR
+                                } else {
+                                    engine.setLanguage(ttsAccent.locale) >= TextToSpeech.LANG_AVAILABLE
+                                }
+                                if (!ready) {
+                                    Toast.makeText(
+                                        context,
+                                        "${ttsAccent.label}语音不可用，请检查系统文字转语音设置",
+                                        Toast.LENGTH_SHORT,
+                                    ).show()
+                                    return@WordLookupPanel
+                                }
                                 val result = engine.speak(
                                     entry.word,
                                     TextToSpeech.QUEUE_FLUSH,
@@ -2217,8 +2339,11 @@ private fun MissingBookScreen(
 private fun WordLookupPanel(
     entry: WordEntry,
     stackDepth: Int,
+    ttsAccent: TtsAccent,
+    availableTtsAccents: Set<TtsAccent>,
     onClose: () -> Unit,
     onLookupWord: (String) -> Unit,
+    onTtsAccentChange: (TtsAccent) -> Unit,
     onSpeak: () -> Unit,
 ) {
     val panelHeight = (LocalConfiguration.current.screenHeightDp * 0.38f).dp
@@ -2255,8 +2380,21 @@ private fun WordLookupPanel(
                         color = MaterialTheme.colorScheme.primary,
                     )
                 }
-                IconButton(onClick = onSpeak) {
-                    Icon(Icons.Filled.PlayArrow, contentDescription = "播放读音")
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TtsAccent.entries.forEach { accent ->
+                        FilterChip(
+                            selected = ttsAccent == accent,
+                            onClick = { onTtsAccentChange(accent) },
+                            enabled = accent in availableTtsAccents,
+                            label = { Text(accent.label) },
+                        )
+                    }
+                    IconButton(onClick = onSpeak) {
+                        Icon(Icons.Filled.PlayArrow, contentDescription = "播放读音")
+                    }
                 }
                 IconButton(onClick = onClose) {
                     Icon(Icons.Filled.Close, contentDescription = "关闭")
