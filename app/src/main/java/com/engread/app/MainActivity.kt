@@ -106,6 +106,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
@@ -342,6 +343,21 @@ private fun EngReadApp() {
 
     fun showMessage(message: String) {
         scope.launch { snackbarHostState.showSnackbar(message) }
+    }
+
+    fun showUndoMessage(message: String, onRestore: suspend () -> Unit) {
+        scope.launch {
+            val result = snackbarHostState.showSnackbar(
+                message = message,
+                actionLabel = "恢复",
+                withDismissAction = true,
+            )
+            if (result == SnackbarResult.ActionPerformed) {
+                withContext(Dispatchers.IO) { onRestore() }
+                refreshAll()
+                snackbarHostState.showSnackbar("已恢复")
+            }
+        }
     }
 
     BackHandler {
@@ -649,7 +665,9 @@ private fun EngReadApp() {
                         scope.launch {
                             withContext(Dispatchers.IO) { repository.deleteNote(note.id) }
                             refreshAll()
-                            showMessage("笔记已删除")
+                            showUndoMessage("笔记已删除") {
+                                repository.restoreNote(note)
+                            }
                         }
                     },
                     onDeleteNotes = { selectedNotes ->
@@ -658,7 +676,9 @@ private fun EngReadApp() {
                                 selectedNotes.forEach { repository.deleteNote(it.id) }
                             }
                             refreshAll()
-                            showMessage("已删除 ${selectedNotes.size} 条笔记")
+                            showUndoMessage("已删除 ${selectedNotes.size} 条笔记") {
+                                selectedNotes.forEach { repository.restoreNote(it) }
+                            }
                         }
                     },
                     onDeleteLookupHistory = { selectedEntries ->
@@ -667,14 +687,19 @@ private fun EngReadApp() {
                                 selectedEntries.forEach { repository.deleteLookupHistory(it.id) }
                             }
                             refreshAll()
-                            showMessage("已删除 ${selectedEntries.size} 条查词记录")
+                            showUndoMessage("已删除 ${selectedEntries.size} 条查词记录") {
+                                selectedEntries.forEach { repository.restoreLookupHistory(it) }
+                            }
                         }
                     },
                     onClearHistory = {
                         scope.launch {
+                            val removedEntries = lookupHistory
                             withContext(Dispatchers.IO) { repository.clearLookupHistory() }
                             refreshAll()
-                            showMessage("查词历史已清空")
+                            showUndoMessage("查词历史已清空") {
+                                removedEntries.forEach { repository.restoreLookupHistory(it) }
+                            }
                         }
                     },
                 )
@@ -4622,13 +4647,26 @@ private fun SwipeDeleteContainer(
     onDelete: () -> Unit,
     content: @Composable () -> Unit,
 ) {
+    var deleteArmed by remember { mutableStateOf(false) }
+    LaunchedEffect(deleteArmed) {
+        if (deleteArmed) {
+            delay(4_000)
+            deleteArmed = false
+        }
+    }
     val dismissState = rememberSwipeToDismissBoxState(
         confirmValueChange = { value ->
             if (enabled && value == SwipeToDismissBoxValue.EndToStart) {
-                onDelete()
+                if (deleteArmed) {
+                    deleteArmed = false
+                    onDelete()
+                } else {
+                    deleteArmed = true
+                }
             }
             false
         },
+        positionalThreshold = { distance -> distance * 0.68f },
     )
     SwipeToDismissBox(
         state = dismissState,
@@ -4640,15 +4678,39 @@ private fun SwipeDeleteContainer(
                 modifier = Modifier
                     .fillMaxSize()
                     .clip(RoundedCornerShape(8.dp))
-                    .background(MaterialTheme.colorScheme.errorContainer)
+                    .background(
+                        if (deleteArmed) {
+                            MaterialTheme.colorScheme.errorContainer
+                        } else {
+                            MaterialTheme.colorScheme.tertiaryContainer
+                        },
+                    )
                     .padding(end = 30.dp),
                 contentAlignment = Alignment.CenterEnd,
             ) {
-                Icon(
-                    Icons.Filled.Delete,
-                    contentDescription = "删除",
-                    tint = MaterialTheme.colorScheme.onErrorContainer,
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = if (deleteArmed) "再左拉删除" else "继续左拉",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = if (deleteArmed) {
+                            MaterialTheme.colorScheme.onErrorContainer
+                        } else {
+                            MaterialTheme.colorScheme.onTertiaryContainer
+                        },
+                    )
+                    Icon(
+                        Icons.Filled.Delete,
+                        contentDescription = "删除",
+                        tint = if (deleteArmed) {
+                            MaterialTheme.colorScheme.onErrorContainer
+                        } else {
+                            MaterialTheme.colorScheme.onTertiaryContainer
+                        },
+                    )
+                }
             }
         },
         content = {

@@ -177,6 +177,11 @@ class LibraryRepository(
     }
 
     @Synchronized
+    fun restoreNote(note: ReaderNote) {
+        saveNotes(listOf(note) + getNotes().filterNot { it.id == note.id })
+    }
+
+    @Synchronized
     fun getLookupHistory(): List<LookupHistoryEntry> {
         if (!lookupHistoryFile.exists()) return emptyList()
         val root = runCatching { JSONObject(lookupHistoryFile.readText()) }.getOrNull() ?: return emptyList()
@@ -236,6 +241,11 @@ class LibraryRepository(
     @Synchronized
     fun deleteLookupHistory(id: String) {
         saveLookupHistory(getLookupHistory().filterNot { it.id == id })
+    }
+
+    @Synchronized
+    fun restoreLookupHistory(entry: LookupHistoryEntry) {
+        saveLookupHistory((listOf(entry) + getLookupHistory().filterNot { it.id == entry.id }).take(300))
     }
 
     @Synchronized
