@@ -1513,6 +1513,10 @@ private fun ReaderPageSurface(
         controlsVisibleEpoch += 1
     }
 
+    fun hideControls() {
+        controlsVisible = false
+    }
+
     LaunchedEffect(controlsVisible, controlsVisibleEpoch) {
         if (controlsVisible) {
             delay(3_000)
@@ -1540,8 +1544,13 @@ private fun ReaderPageSurface(
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = 34.dp)
-                    .pointerInput(bookTitle, chapterTitle, page.index) {
-                        detectTapGestures(onTap = { showControls() })
+                    .pointerInput(bookTitle, chapterTitle, page.index, controlsVisible) {
+                        detectTapGestures(
+                            onTap = {
+                                if (controlsVisible) hideControls() else showControls()
+                            },
+                            onLongPress = { onOpenPageSettings() },
+                        )
                     },
             ) {
                 ReaderCornerMeta(
@@ -1605,6 +1614,7 @@ private fun ReaderPageSurface(
                 onBack = onBack,
                 onOpenToc = onOpenToc,
                 onOpenPageSettings = onOpenPageSettings,
+                onHideControls = { hideControls() },
             )
         }
     }
@@ -1748,14 +1758,6 @@ private suspend fun PointerInputScope.detectReaderTextGestures(
 ) {
     awaitEachGesture {
         val firstDown = awaitFirstDown(requireUnconsumed = false)
-        val upBeforeLongPress = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
-            waitForUpOrCancellation()
-        }
-        if (upBeforeLongPress != null) {
-            return@awaitEachGesture
-        }
-
-        firstDown.consume()
         val layout = getLayoutResult() ?: return@awaitEachGesture
         val longPressOffset = layout.getOffsetForPosition(firstDown.position)
         val word = extractWordAt(text, longPressOffset)
@@ -1763,19 +1765,64 @@ private suspend fun PointerInputScope.detectReaderTextGestures(
         val paragraphRange = paragraphRangeAt(text, longPressOffset)
         val pointerId = firstDown.id
         var selecting = false
+        var wordLookupTriggered = false
+        var pointerUp = false
 
         try {
+            val wordLookupDelayMillis = 2_000L
+            var releasedBeforeLookup = false
+            withTimeoutOrNull(wordLookupDelayMillis) {
+                while (true) {
+                    val event = awaitPointerEvent()
+                    val change = event.changes.firstOrNull { it.id == pointerId }
+                        ?: event.changes.firstOrNull()
+                    if (change == null) continue
+                    if (change.changedToUpIgnoreConsumed() || !change.pressed) {
+                        pointerUp = true
+                        releasedBeforeLookup = true
+                        return@withTimeoutOrNull
+                    }
+                    if (change.positionChangedIgnoreConsumed()) {
+                        val movedEnough = (change.position - firstDown.position).getDistance() >
+                            viewConfiguration.touchSlop
+                        if (!movedEnough || paragraphRange == null) continue
+                        selecting = true
+                        firstDown.consume()
+                        change.consume()
+                        onSelectionGestureStart()
+                        onSelectionChange(paragraphRange.first, paragraphRange.last)
+                        val currentOffset = (getLayoutResult() ?: layout).getOffsetForPosition(change.position)
+                        val anchorOffset = if (currentOffset < paragraphRange.first) {
+                            paragraphRange.last
+                        } else {
+                            paragraphRange.first
+                        }
+                        onSelectionChange(anchorOffset, currentOffset)
+                        return@withTimeoutOrNull
+                    }
+                }
+            }
+            if (releasedBeforeLookup || pointerUp) {
+                return@awaitEachGesture
+            }
+            if (!selecting && word != null && canLookupWord()) {
+                firstDown.consume()
+                wordLookupTriggered = true
+                onWordLongPress(word, paragraphIndexForOffset(longPressOffset), wordRange)
+            }
+
             while (true) {
                 val event = awaitPointerEvent()
                 val change = event.changes.firstOrNull { it.id == pointerId }
                     ?: event.changes.firstOrNull()
                     ?: continue
                 if (change.changedToUpIgnoreConsumed() || !change.pressed) {
-                    if (!selecting && word != null && canLookupWord()) {
-                        change.consume()
-                        onWordLongPress(word, paragraphIndexForOffset(longPressOffset), wordRange)
-                    }
+                    if (wordLookupTriggered || selecting) change.consume()
                     break
+                }
+                if (wordLookupTriggered) {
+                    change.consume()
+                    continue
                 }
                 if (change.positionChangedIgnoreConsumed()) {
                     val currentLayout = getLayoutResult() ?: continue
@@ -1884,6 +1931,7 @@ private fun ReaderTopControls(
     onBack: () -> Unit,
     onOpenToc: () -> Unit,
     onOpenPageSettings: () -> Unit,
+    onHideControls: () -> Unit,
 ) {
     Surface(
         tonalElevation = 4.dp,
@@ -1909,6 +1957,7 @@ private fun ReaderTopControls(
                     .weight(1f)
                     .pointerInput(title) {
                         detectTapGestures(
+                            onTap = { onHideControls() },
                             onLongPress = { onOpenPageSettings() },
                         )
                     },
