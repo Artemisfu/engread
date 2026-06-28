@@ -6,7 +6,9 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.engread.app.data.SourceType
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
@@ -46,6 +48,35 @@ class BookImporterInstrumentedTest {
         assertEquals("EngRead EPUB Smoke", book.title)
         assertTrue(book.paragraphs.any { it.contains("The first EPUB paragraph appears here.") })
         assertEquals(listOf("Chapter One", "Chapter Two"), book.toc.map { it.title })
+    }
+
+    @Test
+    fun importsEpubWhenCentralDirectoryIsMissingButLocalEntriesAreComplete() {
+        val epubFile = File(context.cacheDir, "engread_epub_no_central_directory.epub")
+        createSmokeEpub(epubFile)
+        removeZipCentralDirectory(epubFile)
+
+        val book = BookImporter(context).import(Uri.fromFile(epubFile))
+
+        assertEquals(SourceType.EPUB, book.sourceType)
+        assertEquals("EngRead EPUB Smoke", book.title)
+        assertTrue(book.paragraphs.any { it.contains("Second chapter text arrives through the EPUB spine.") })
+        assertEquals(listOf("Chapter One", "Chapter Two"), book.toc.map { it.title })
+    }
+
+    @Test
+    fun reportsReadableErrorWhenEpubIsTruncatedBeforeOpf() {
+        val epubFile = File(context.cacheDir, "engread_epub_truncated_before_opf.epub")
+        createTruncatedImageOnlyEpub(epubFile)
+
+        try {
+            BookImporter(context).import(Uri.fromFile(epubFile))
+            fail("Expected truncated EPUB import to fail")
+        } catch (error: Throwable) {
+            val message = error.message.orEmpty()
+            assertTrue(message, message.contains("EPUB 文件不完整"))
+            assertFalse(message, message.contains("zip end", ignoreCase = true))
+        }
     }
 
     @Test
@@ -214,6 +245,31 @@ class BookImporterInstrumentedTest {
         }
     }
 
+    private fun createTruncatedImageOnlyEpub(file: File) {
+        ZipOutputStream(file.outputStream()).use { zip ->
+            zip.putNextEntry(ZipEntry("mimetype"))
+            zip.write("application/epub+zip".toByteArray())
+            zip.closeEntry()
+            zip.textEntry(
+                "META-INF/container.xml",
+                """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+                  <rootfiles>
+                    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+                  </rootfiles>
+                </container>
+                """.trimIndent(),
+            )
+            zip.putNextEntry(ZipEntry("OEBPS/1865371151774153442_image25.jpg"))
+            zip.write(ByteArray(2048) { index -> (index % 251).toByte() })
+            zip.closeEntry()
+        }
+        removeZipCentralDirectory(file)
+        val bytes = file.readBytes()
+        file.writeBytes(bytes.copyOf((bytes.size - 512).coerceAtLeast(0)))
+    }
+
     private fun ZipOutputStream.textEntry(name: String, content: String) {
         putNextEntry(ZipEntry(name))
         write(content.toByteArray())
@@ -245,6 +301,21 @@ class BookImporterInstrumentedTest {
             }
         }
         file.writeBytes(bytes)
+    }
+
+    private fun removeZipCentralDirectory(file: File) {
+        val bytes = file.readBytes()
+        val centralDirectoryOffset = bytes.indexOfZipSignature(0x02014b50)
+        if (centralDirectoryOffset >= 0) {
+            file.writeBytes(bytes.copyOf(centralDirectoryOffset))
+        }
+    }
+
+    private fun ByteArray.indexOfZipSignature(signature: Int): Int {
+        for (offset in 0..size - 4) {
+            if (hasZipSignature(offset, signature)) return offset
+        }
+        return -1
     }
 
     private fun ByteArray.hasZipSignature(offset: Int, signature: Int): Boolean =

@@ -19,6 +19,8 @@ import java.net.URLDecoder
 import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
 import java.util.Locale
+import java.util.zip.DataFormatException
+import java.util.zip.Inflater
 import java.util.zip.ZipException
 import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
@@ -194,6 +196,12 @@ private data class ParsedEpub(
 )
 
 private object EpubParser {
+    private const val LOCAL_FILE_HEADER_SIGNATURE = 0x04034B50
+    private const val LOCAL_FILE_HEADER_SIZE = 30
+    private const val ZIP_FLAG_DATA_DESCRIPTOR = 0x08
+    private const val ZIP_METHOD_STORED = 0
+    private const val ZIP_METHOD_DEFLATED = 8
+
     private data class ManifestItem(
         val id: String,
         val href: String,
@@ -290,10 +298,13 @@ private object EpubParser {
         val entries = readZipEntriesLenient(bytes, cacheDir)
         val containerPath = "META-INF/container.xml"
         val opfPath = entries[containerPath]?.let { data ->
-            parseContainerRootfile(data.toText())
+            runCatching { parseContainerRootfile(data.toText()) }.getOrDefault("")
         } ?: entries.keys.firstOrNull { it.endsWith(".opf", ignoreCase = true) }.orEmpty()
-        require(opfPath.isNotBlank()) { "EPUB 没有找到 OPF 包描述文件" }
-        val opfBytes = entries[opfPath] ?: error("EPUB 缺少 OPF 包描述文件")
+        require(opfPath.isNotBlank()) {
+            "EPUB 文件不完整：没有找到 OPF 包描述文件，请重新下载后再导入"
+        }
+        val opfBytes = entries[opfPath]
+            ?: error("EPUB 文件不完整：缺少 OPF 包描述文件，请重新下载后再导入")
         val opf = parseOpf(opfBytes.toText())
         val opfDir = opfPath.substringBeforeLast('/', "")
         val tocRefs = buildList {
@@ -369,23 +380,126 @@ private object EpubParser {
         val tempFile = File.createTempFile("engread-epub-", ".epub", cacheDir)
         try {
             tempFile.writeBytes(bytes)
-            ZipFile(tempFile).use { zip ->
-                val result = linkedMapOf<String, ByteArray>()
-                val entries = zip.entries()
-                while (entries.hasMoreElements()) {
-                    val entry = entries.nextElement()
-                    if (entry.isDirectory) continue
-                    val name = entry.name.normalizedZipPath()
-                    if (name.isBlank()) continue
-                    if (!name.isEpubMetadataOrTextPath()) continue
-                    val data = zip.readEntryBytesLenient(entry)
-                    if (data.isNotEmpty()) result[name] = data
+            return runCatching {
+                ZipFile(tempFile).use { zip ->
+                    val result = linkedMapOf<String, ByteArray>()
+                    val entries = zip.entries()
+                    while (entries.hasMoreElements()) {
+                        val entry = entries.nextElement()
+                        if (entry.isDirectory) continue
+                        val name = entry.name.normalizedZipPath()
+                        if (name.isBlank()) continue
+                        if (!name.isEpubMetadataOrTextPath()) continue
+                        val data = zip.readEntryBytesLenient(entry)
+                        if (data.isNotEmpty()) result[name] = data
+                    }
+                    result
                 }
-                return result
+            }.getOrElse { error ->
+                val localEntries = readLocalZipEntriesLenient(bytes)
+                if (localEntries.isNotEmpty()) localEntries else throw error
             }
         } finally {
             tempFile.delete()
         }
+    }
+
+    private fun readLocalZipEntriesLenient(bytes: ByteArray): Map<String, ByteArray> {
+        val result = linkedMapOf<String, ByteArray>()
+        var offset = 0
+        while (offset + LOCAL_FILE_HEADER_SIZE <= bytes.size) {
+            if (bytes.u32LeOrNull(offset) != LOCAL_FILE_HEADER_SIGNATURE) {
+                val nextHeader = bytes.indexOfLocalFileHeader(offset + 1)
+                if (nextHeader < 0) break
+                offset = nextHeader
+                continue
+            }
+            val flags = bytes.u16LeOrNull(offset + 6) ?: break
+            val compression = bytes.u16LeOrNull(offset + 8) ?: break
+            val compressedSize = bytes.u32LeOrNull(offset + 18) ?: break
+            val nameLength = bytes.u16LeOrNull(offset + 26) ?: break
+            val extraLength = bytes.u16LeOrNull(offset + 28) ?: break
+            val nameStart = offset + LOCAL_FILE_HEADER_SIZE
+            val dataStart = nameStart + nameLength + extraLength
+            if (nameStart < 0 || dataStart < nameStart || dataStart > bytes.size) break
+            val name = bytes.copyOfRange(nameStart, nameStart + nameLength)
+                .toString(StandardCharsets.UTF_8)
+                .normalizedZipPath()
+            val usesDataDescriptor = flags and ZIP_FLAG_DATA_DESCRIPTOR != 0
+            val declaredDataEnd = if (usesDataDescriptor && compressedSize == 0) {
+                bytes.indexOfLocalFileHeader(dataStart).takeIf { it >= 0 } ?: bytes.size
+            } else {
+                dataStart + compressedSize
+            }
+            val dataEnd = declaredDataEnd.coerceIn(dataStart, bytes.size)
+            if (name.isEpubMetadataOrTextPath()) {
+                val compressedData = bytes.copyOfRange(dataStart, dataEnd)
+                val data = runCatching {
+                    decodeLocalZipEntry(
+                        compression = compression,
+                        compressedData = compressedData,
+                    )
+                }.getOrNull()
+                if (data != null && data.isNotEmpty()) result[name] = data
+            }
+            if (declaredDataEnd <= offset) break
+            offset = declaredDataEnd
+        }
+        return result
+    }
+
+    private fun decodeLocalZipEntry(
+        compression: Int,
+        compressedData: ByteArray,
+    ): ByteArray =
+        when (compression) {
+            ZIP_METHOD_STORED -> compressedData
+            ZIP_METHOD_DEFLATED -> inflateRawDeflate(compressedData)
+            else -> ByteArray(0)
+        }
+
+    private fun inflateRawDeflate(data: ByteArray): ByteArray {
+        val inflater = Inflater(true)
+        val output = ByteArrayOutputStream()
+        try {
+            inflater.setInput(data)
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (!inflater.finished() && !inflater.needsInput()) {
+                val read = try {
+                    inflater.inflate(buffer)
+                } catch (error: DataFormatException) {
+                    if (output.size() > 0) break else throw error
+                }
+                if (read <= 0) break
+                output.write(buffer, 0, read)
+            }
+        } finally {
+            inflater.end()
+        }
+        return output.toByteArray()
+    }
+
+    private fun ByteArray.indexOfLocalFileHeader(start: Int): Int {
+        if (start < 0 || start + 4 > size) return -1
+        for (index in start..(size - 4)) {
+            if (u32LeOrNull(index) == LOCAL_FILE_HEADER_SIGNATURE) return index
+        }
+        return -1
+    }
+
+    private fun ByteArray.u16LeOrNull(offset: Int): Int? {
+        if (offset < 0 || offset + 1 >= size) return null
+        return (this[offset].toInt() and 0xFF) or
+            ((this[offset + 1].toInt() and 0xFF) shl 8)
+    }
+
+    private fun ByteArray.u32LeOrNull(offset: Int): Int? {
+        if (offset < 0 || offset + 3 >= size) return null
+        val value = (this[offset].toLong() and 0xFF) or
+            ((this[offset + 1].toLong() and 0xFF) shl 8) or
+            ((this[offset + 2].toLong() and 0xFF) shl 16) or
+            ((this[offset + 3].toLong() and 0xFF) shl 24)
+        return value.takeIf { it <= Int.MAX_VALUE }?.toInt()
     }
 
     private fun ZipFile.readEntryBytesLenient(entry: java.util.zip.ZipEntry): ByteArray {
