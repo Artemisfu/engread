@@ -1230,7 +1230,10 @@ private fun ChatScreen(
     var localSuggestions by rememberSaveable(selectedBookId) {
         mutableStateOf(defaultReadingQuestions.randomThree())
     }
+    var localSuggestionsLoading by rememberSaveable(selectedBookId) { mutableStateOf(false) }
+    var initialSuggestionsRequested by rememberSaveable(selectedBookId) { mutableStateOf(false) }
     val visibleSuggestions = remoteSuggestions.ifEmpty { localSuggestions }
+    val suggestionsAreLoading = suggestionsLoading || localSuggestionsLoading
     var input by rememberSaveable(selectedBookId) { mutableStateOf("") }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1239,6 +1242,25 @@ private fun ChatScreen(
     var wordLookupSerial by remember(selectedBookId) { mutableStateOf(0) }
     var ttsAccent by rememberSaveable { mutableStateOf(TtsAccent.US) }
     var tocMenuOpen by rememberSaveable(selectedBookId) { mutableStateOf(false) }
+    val showLatestButton = selectedBook != null && messages.isNotEmpty() && listState.canScrollForward
+
+    fun refreshLocalSuggestions() {
+        if (localSuggestionsLoading) return
+        scope.launch {
+            localSuggestionsLoading = true
+            delay(360)
+            localSuggestions = defaultReadingQuestions.randomThree()
+            localSuggestionsLoading = false
+        }
+    }
+
+    LaunchedEffect(selectedBookId, selectedBook?.id, settings.translation.isConfigured, remoteSuggestions.isEmpty()) {
+        val book = selectedBook ?: return@LaunchedEffect
+        if (settings.translation.isConfigured && remoteSuggestions.isEmpty() && !initialSuggestionsRequested) {
+            initialSuggestionsRequested = true
+            onRefreshSuggestions(book)
+        }
+    }
 
     fun closeTopWordCard() {
         val nextStack = wordStack.dropLast(1)
@@ -1342,13 +1364,6 @@ private fun ChatScreen(
         }
     }
 
-    LaunchedEffect(messages.size, isSending, suggestionsLoading) {
-        val target = listState.layoutInfo.totalItemsCount - 1
-        if (target >= 0 && (messages.isNotEmpty() || suggestionsLoading)) {
-            listState.animateScrollToItem(target)
-        }
-    }
-
     Scaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
@@ -1368,6 +1383,27 @@ private fun ChatScreen(
         },
         bottomBar = {
             Column {
+                if (showLatestButton && wordStack.isEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.End,
+                    ) {
+                        FilledTonalButton(
+                            onClick = {
+                                scope.launch {
+                                    val target = listState.layoutInfo.totalItemsCount - 1
+                                    if (target >= 0) listState.scrollToItem(target)
+                                }
+                            },
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                        ) {
+                            Text("看最新")
+                        }
+                    }
+                }
                 wordStack.lastOrNull()?.let { entry ->
                     WordLookupPanel(
                         entry = entry,
@@ -1482,15 +1518,15 @@ private fun ChatScreen(
                         item {
                             ChatSuggestionsPanel(
                                 questions = visibleSuggestions,
-                                loading = suggestionsLoading,
+                                loading = suggestionsAreLoading,
                                 onQuestionClick = { question ->
                                     val book = selectedBook ?: return@ChatSuggestionsPanel
                                     onSendMessage(book, question)
                                 },
                                 onRefresh = {
                                     val book = selectedBook ?: return@ChatSuggestionsPanel
-                                    if (messages.isEmpty()) {
-                                        localSuggestions = defaultReadingQuestions.randomThree()
+                                    if (!settings.translation.isConfigured) {
+                                        refreshLocalSuggestions()
                                     } else {
                                         onRefreshSuggestions(book)
                                     }
@@ -1601,8 +1637,8 @@ private fun ChatSuggestionsPanel(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 6.dp, bottom = 4.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+            .padding(top = 4.dp, bottom = 2.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1635,15 +1671,14 @@ private fun ChatSuggestionsPanel(
                 Surface(
                     onClick = { onQuestionClick(question) },
                     shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 1.dp,
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(
                         text = question,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                     )
                 }
             }
@@ -3268,6 +3303,8 @@ private fun ReaderScreen(
     chatSelectionText?.let { text ->
         SelectionChatDialog(
             paragraph = text,
+            bookTitle = book.title,
+            settings = settings,
             onDismiss = {
                 chatSelectionText = null
                 if (selectedText.isNotBlank()) selectionTipVisible = true
@@ -4920,6 +4957,8 @@ private fun SentenceNoteDialog(
 @Composable
 private fun SelectionChatDialog(
     paragraph: String,
+    bookTitle: String,
+    settings: ReaderSettings,
     onDismiss: () -> Unit,
     onSend: (String) -> Unit,
 ) {
@@ -4928,6 +4967,48 @@ private fun SelectionChatDialog(
     var suggestions by remember(paragraph) {
         mutableStateOf(selectionChatQuestionPrompts.randomThree())
     }
+    var suggestionsLoading by remember(paragraph) { mutableStateOf(settings.translation.isConfigured) }
+    val scope = rememberCoroutineScope()
+
+    fun refreshSuggestions() {
+        if (suggestionsLoading) return
+        scope.launch {
+            suggestionsLoading = true
+            if (settings.translation.isConfigured) {
+                val result = runCatching {
+                    OpenAiBookChat.suggestSelectionQuestions(
+                        bookTitle = bookTitle,
+                        excerpt = excerpt,
+                        settings = settings.translation,
+                    )
+                }
+                suggestions = result.getOrDefault(selectionChatQuestionPrompts.randomThree())
+                    .ifEmpty { selectionChatQuestionPrompts.randomThree() }
+            } else {
+                delay(360)
+                suggestions = selectionChatQuestionPrompts.randomThree()
+            }
+            suggestionsLoading = false
+        }
+    }
+
+    LaunchedEffect(paragraph, bookTitle, settings.translation.isConfigured) {
+        if (settings.translation.isConfigured) {
+            val result = runCatching {
+                OpenAiBookChat.suggestSelectionQuestions(
+                    bookTitle = bookTitle,
+                    excerpt = excerpt,
+                    settings = settings.translation,
+                )
+            }
+            suggestions = result.getOrDefault(selectionChatQuestionPrompts.randomThree())
+                .ifEmpty { selectionChatQuestionPrompts.randomThree() }
+            suggestionsLoading = false
+        } else {
+            suggestionsLoading = false
+        }
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null) },
@@ -4959,23 +5040,36 @@ private fun SelectionChatDialog(
                         color = MaterialTheme.colorScheme.primary,
                         fontWeight = FontWeight.Bold,
                     )
-                    IconButton(onClick = { suggestions = selectionChatQuestionPrompts.randomThree() }) {
+                    IconButton(onClick = { refreshSuggestions() }, enabled = !suggestionsLoading) {
                         Icon(Icons.Filled.Refresh, contentDescription = "换一批")
                     }
                 }
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    suggestions.forEach { prompt ->
-                        AssistChip(
-                            onClick = { question = prompt },
-                            label = {
-                                Text(
-                                    text = prompt,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                        )
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (suggestionsLoading) {
+                        val brush = ShimmerBrush()
+                        repeat(3) { index ->
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth(if (index == 2) 0.84f else 1f)
+                                    .height(34.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(brush),
+                            )
+                        }
+                    } else {
+                        suggestions.forEach { prompt ->
+                            AssistChip(
+                                onClick = { question = prompt },
+                                label = {
+                                    Text(
+                                        text = prompt,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
                     }
                 }
                 TextField(

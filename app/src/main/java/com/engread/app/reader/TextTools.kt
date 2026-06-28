@@ -447,14 +447,48 @@ object OpenAiBookChat {
             val currentUserMessage = recentMessages.lastOrNull { it.role == ChatRole.USER }?.content.orEmpty()
             val latestFragments = recentMessages.takeLast(10).toPromptTranscript().ifBlank { "暂无。" }
             val prompt = buildBookChatPrompt(book, summary, latestFragments, currentUserMessage) +
-                "\n\n请根据上面的最新阅读讨论，生成 3 个用户下一步可能想问的问题。" +
-                "要求：只返回 JSON 字符串数组；每个问题 8 到 24 个汉字；问题要具体，能继续推进阅读理解。"
+                "\n\n请围绕书名《${book.title}》和上面的最新阅读讨论，生成 3 个用户下一步可能想问的问题。" +
+                "提问方式请借鉴《如何阅读一本书》中的检视阅读、分析阅读和批判性阅读思路，" +
+                "但问题必须贴合这本书当前内容，不要泛泛而谈。" +
+                "要求：只返回 JSON 字符串数组；每个问题 8 到 28 个汉字；问题要具体，能继续推进阅读理解。"
             val content = settings.createChatCompletion(
                 messages = JSONArray()
                     .put(
                         JSONObject()
                             .put("role", "system")
                             .put("content", "You generate concise follow-up reading questions. Return JSON array only."),
+                    )
+                    .put(JSONObject().put("role", "user").put("content", prompt)),
+                temperature = 0.55,
+            )
+            content.toQuestionList().take(3)
+        }
+
+    suspend fun suggestSelectionQuestions(
+        bookTitle: String,
+        excerpt: String,
+        settings: TranslationSettings,
+    ): List<String> =
+        withContext(Dispatchers.IO) {
+            if (!settings.isConfigured) {
+                error("请先在设置里填写 Base URL、API Key 和模型。")
+            }
+            val prompt = buildString {
+                appendLine("当前书名：《${bookTitle.ifBlank { "未知书籍" }}》")
+                appendLine("用户在正文中选中了下面这段英文：")
+                appendLine(excerpt.ifBlank { "暂无。" })
+                appendLine()
+                appendLine("请生成 3 个适合用户继续追问的问题。")
+                appendLine("提问方式请借鉴《如何阅读一本书》中的检视阅读、分析阅读和批判性阅读思路。")
+                appendLine("问题必须贴合当前选中文本和这本书，不要泛泛而谈。")
+                appendLine("只返回 JSON 字符串数组；每个问题 8 到 28 个汉字。")
+            }
+            val content = settings.createChatCompletion(
+                messages = JSONArray()
+                    .put(
+                        JSONObject()
+                            .put("role", "system")
+                            .put("content", "You generate concise Chinese reading questions for a selected passage. Return JSON array only."),
                     )
                     .put(JSONObject().put("role", "user").put("content", prompt)),
                 temperature = 0.55,
