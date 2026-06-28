@@ -1,0 +1,105 @@
+# Compact ECDICT-style English-Chinese core lexicon for instant lookup.
+# Fields: word, phonetic, meaning, root/affix, cognates, synonyms.
+about	/əˈbaʊt/	关于；大约；在附近	无固定词根	around|concerning|approximately	near|around
+after	/ˈæftər/	在……之后；后来	无固定词根	afterward|afternoon|afterlife	later|following
+again	/əˈɡen/	再次；又一次	无固定词根	against|regain|gain	once more|anew
+air	/eər/	空气；神态；旋律	拉丁语 aer，空气	aerial|aerate|aerobic	atmosphere|breeze
+always	/ˈɔːlweɪz/	总是；一直	all + way 的固定副词	anyway|nowadays|sideways	forever|constantly
+among	/əˈmʌŋ/	在……之中	无固定词根	amongst|mingle|communal	amid|between
+answer	/ˈænsər/	回答；答案	古英语 andswaru，回应	responsive|respond|reply	reply|solution
+because	/bɪˈkɔːz/	因为	by + cause	cause|causal|causation	since|as
+before	/bɪˈfɔːr/	在……之前；以前	be + fore，前方	foresee|foreword|foretell	earlier|previously
+between	/bɪˈtwiːn/	在两者之间；介于	古英语 tweon，两者	twin|twain|intertwine	amid|among
+book	/bʊk/	书；预订	古英语 boc，书	booklet|bookmark|bookshelf	volume|reserve
+child	/tʃaɪld/	儿童；孩子	无固定词根	childhood|childish|children	kid|youngster
+city	/ˈsɪti/	城市	拉丁语 civis，市民	civic|civil|citizen	town|metropolis
+day	/deɪ/	一天；白天	古英语 dæg	daily|daylight|today	date|daytime
+door	/dɔːr/	门	古英语 duru	doorway|outdoor|indoors	gate|entrance
+dream	/driːm/	梦；梦想	古英语 dream	dreamer|daydream|dreamlike	vision|wish
+earth	/ɜːrθ/	地球；土地；泥土	古英语 eorthe	earthly|earthquake|unearth	world|soil
+even	/ˈiːvən/	甚至；平坦的；偶数的	古英语 efen，平	evenly|uneven|evening	still|level
+eye	/aɪ/	眼睛；视力	古英语 eage	eyelid|eyesight|eyewitness	sight|view
+face	/feɪs/	脸；面对	拉丁语 facies，面貌	facial|surface|deface	look|confront
+family	/ˈfæməli/	家庭；家人	拉丁语 familia	familiar|familial|familiarity	household|relatives
+friend	/frend/	朋友	古英语 freond	friendly|friendship|befriend	companion|ally
+good	/ɡʊd/	好的；善良的	古英语 god	goodness|goodwill|goods	fine|kind
+great	/ɡreɪt/	伟大的；很大的	古英语 great	greatly|greatness|greater	grand|large
+hand	/hænd/	手；递给	古英语 hand	handful|handle|handwriting	palm|give
+heart	/hɑːrt/	心；内心；勇气	古英语 heorte	hearty|heartless|heartfelt	core|spirit
+home	/hoʊm/	家；回家	古英语 ham	homeland|homely|homeward	house|dwelling
+house	/haʊs/	房子；一家人	古英语 hus	household|housing|warehouse	home|building
+know	/noʊ/	知道；了解	古英语 cnawan	knowledge|known|unknown	understand|recognize
+life	/laɪf/	生命；生活	古英语 lif	lively|lifetime|lifeless	existence|living
+light	/laɪt/	光；轻的；点燃	古英语 leoht	lighting|delight|enlighten	bright|lamp
+little	/ˈlɪtəl/	小的；少量	古英语 lytel	littleness|belittle|least	small|minor
+look	/lʊk/	看；样子	古英语 locian	outlook|overlook|looking	see|glance
+love	/lʌv/	爱；喜爱	古英语 lufu	lover|lovely|beloved	affection|adore
+man	/mæn/	男人；人类	古英语 mann	mankind|manly|human	person|male
+mind	/maɪnd/	思想；介意	古英语 gemynd，记忆	mindful|remind|mindset	thought|care
+morning	/ˈmɔːrnɪŋ/	早晨	morn + ing	morn|tomorrow|mourning	dawn|daybreak
+mother	/ˈmʌðər/	母亲	古英语 modor	maternal|motherly|motherhood	mom|parent
+night	/naɪt/	夜晚	古英语 niht	nightly|midnight|overnight	evening|darkness
+people	/ˈpiːpəl/	人们；民族	拉丁语 populus	popular|population|public	persons|folk
+place	/pleɪs/	地方；放置	拉丁语 platea	placement|replace|displace	location|put
+read	/riːd/	阅读；读	古英语 rædan	reader|reading|readable	peruse|study
+room	/ruːm/	房间；空间	古英语 rum	roomy|bedroom|classroom	chamber|space
+said	/sed/	说；表示	say 的过去式	say|saying|unsaid	spoke|stated
+school	/skuːl/	学校；学派	希腊语 skhole	scholar|scholastic|schooling	academy|class
+story	/ˈstɔːri/	故事；楼层	拉丁语 historia	history|historian|storey	tale|narrative
+thing	/θɪŋ/	事情；东西	古英语 þing	anything|something|nothing	object|matter
+thought	/θɔːt/	想法；思考的过去式	think 的名词和过去式	think|thoughtful|thoughtless	idea|reflection
+time	/taɪm/	时间；次数	古英语 tima	timing|timely|lifetime	moment|period
+water	/ˈwɔːtər/	水；浇水	古英语 wæter	watery|waterfall|waterproof	liquid|rain
+way	/weɪ/	道路；方式	古英语 weg	wayward|always|pathway	path|method
+world	/wɜːrld/	世界	古英语 weorold	worldly|worldwide|underworld	earth|globe
+young	/jʌŋ/	年轻的	古英语 geong	youth|younger|youngster	youthful|new
+ask	/æsk/	问；请求	古英语 ascian	question|request|inquire	query|request
+begin	/bɪˈɡɪn/	开始	古英语 beginnan	beginning|beginner|begun	start|commence
+believe	/bɪˈliːv/	相信；认为	be + lieve，信任	belief|believer|unbelievable	trust|accept
+bring	/brɪŋ/	带来；引起	古英语 bringan	brought|bringing|bringdown	carry|cause
+call	/kɔːl/	呼叫；称为；电话	古诺尔斯语 kalla	caller|recall|calling	name|summon
+come	/kʌm/	来；到达	古英语 cuman	coming|become|income	arrive|approach
+dark	/dɑːrk/	黑暗的；深色的	古英语 deorc	darken|darkness|darkly	dim|black
+feel	/fiːl/	感觉；触摸	古英语 felan	feeling|felt|feelings	sense|touch
+find	/faɪnd/	找到；发现	古英语 findan	finder|finding|found	discover|locate
+follow	/ˈfɑːloʊ/	跟随；遵循	古英语 folgian	follower|following|follow-up	trail|obey
+give	/ɡɪv/	给；让步	古英语 giefan	giver|given|forgive	offer|grant
+hear	/hɪr/	听见；听说	古英语 hieran	hearing|heard|hearsay	listen|notice
+keep	/kiːp/	保持；保存	古英语 cepan	keeper|keeping|safekeeping	hold|retain
+leave	/liːv/	离开；留下；许可	古英语 læfan/leofian	leaving|left|leave-taking	depart|remain
+make	/meɪk/	制造；使得	古英语 macian	maker|making|remake	create|produce
+move	/muːv/	移动；感动	拉丁语 movere	motion|remove|movement	shift|stir
+name	/neɪm/	名字；命名	古英语 nama	nameless|rename|namesake	title|call
+open	/ˈoʊpən/	打开；开放的	古英语 open	opening|openness|reopen	unlock|available
+pass	/pæs/	经过；传递；通过	拉丁语 passus	passage|passport|surpass	go by|transfer
+return	/rɪˈtɜːrn/	返回；归还	re + turn	returning|turn|turnover	come back|restore
+see	/siː/	看见；理解	古英语 seon	seeing|sight|foresee	view|understand
+seem	/siːm/	似乎；好像	古诺尔斯语 sæma	seeming|seemly|semblance	appear|look
+stand	/stænd/	站立；忍受	古英语 standan	standing|understand|standard	rise|tolerate
+take	/teɪk/	拿；带走；花费	古英语 tacan	taken|taking|mistake	get|carry
+tell	/tel/	告诉；辨别	古英语 tellan	teller|telling|retell	inform|say
+turn	/tɜːrn/	转动；轮到	拉丁语 tornare	turning|return|overturn	rotate|change
+voice	/vɔɪs/	声音；表达	拉丁语 vox	vocal|vocation|evoke	sound|speech
+walk	/wɔːk/	走；散步	古英语 wealcan	walker|walking|walkway	stroll|go
+write	/raɪt/	写	古英语 writan	writer|writing|rewrite	compose|record
+be	/biː/	是；存在；成为	古英语 beon	being|been|am|is|are	exist|become
+can	/kæn/	能够；可以；罐头	古英语 cunnan	could|cannot|canned	able to|may
+do	/duː/	做；进行；完成	古英语 don	does|did|done	make|perform
+fall	/fɔːl/	落下；跌倒；秋天	古英语 feallan	fell|fallen|falling	drop|decline
+foot	/fʊt/	脚；英尺	古英语 fot	feet|footstep|football	base|paw
+get	/ɡet/	得到；变得；到达	古诺尔斯语 geta	got|gotten|getting	obtain|become
+go	/ɡoʊ/	去；运行；变成	古英语 gan	went|gone|going	move|travel
+have	/hæv/	有；经历；使	古英语 habban	has|had|having	own|possess
+knife	/naɪf/	刀	古英语 cnif	knives|knifing|penknife	blade|cutter
+leaf	/liːf/	叶子；页	古英语 leaf	leaves|leafy|leaflet	page|foliage
+mouse	/maʊs/	老鼠；鼠标	古英语 mus	mice|mousing|mousepad	rodent|pointer
+not	/nɑːt/	不；没有	古英语 nawiht	nothing|cannot|notebook	no|never
+person	/ˈpɜːrsən/	人；个人	拉丁语 persona	personal|personality|people	individual|human
+run	/rʌn/	跑；运行；经营	古英语 rinnan	ran|running|runner	move fast|operate
+say	/seɪ/	说；表达	古英语 secgan	said|saying|says	tell|state
+send	/send/	发送；派遣	古英语 sendan	sent|sending|sender	deliver|dispatch
+study	/ˈstʌdi/	学习；研究；书房	拉丁语 studium	studies|studied|student	learn|research
+try	/traɪ/	尝试；审判	古法语 trier	tries|tried|trying	attempt|test
+use	/juːz/	使用；用途	拉丁语 uti	used|using|useful	employ|apply
+will	/wɪl/	将；意愿；遗嘱	古英语 willa	would|willing|willpower	shall|desire
+woman	/ˈwʊmən/	女人；妇女	古英语 wifmann	women|womanhood|womanly	female|lady

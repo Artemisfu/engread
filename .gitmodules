@@ -1,0 +1,3 @@
+[submodule "third_party/libmobi"]
+	path = third_party/libmobi
+	url = https://github.com/bfabiszewski/libmobi.git
