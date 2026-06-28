@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
@@ -878,11 +879,30 @@ private fun TextToSpeech.findLocalEnglishVoice(accent: TtsAccent): Voice? {
 private fun TextToSpeech.isLanguageInstalled(locale: Locale): Boolean =
     isLanguageAvailable(locale) >= TextToSpeech.LANG_AVAILABLE
 
-private fun Context.installedTtsEnginePackages(): List<String> =
-    packageManager
+private val KnownTtsEnginePackages = listOf(
+    "com.oplus.ttsaccessibilityengine",
+    "com.google.android.tts",
+    "com.google.android.googlequicksearchbox",
+    "com.heytap.speechassist",
+)
+
+private fun Context.defaultTtsEnginePackage(): String? =
+    Settings.Secure.getString(contentResolver, "tts_default_synth")
+        ?.takeUnless { it.isBlank() || it == "null" }
+
+private fun Context.isPackageInstalled(packageName: String): Boolean =
+    runCatching {
+        packageManager.getPackageInfo(packageName, 0)
+        true
+    }.getOrDefault(false)
+
+private fun Context.installedTtsEnginePackages(): List<String> {
+    val queriedPackages = packageManager
         .queryIntentServices(Intent(TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE), 0)
         .mapNotNull { it.serviceInfo?.packageName }
-        .distinct()
+    val knownInstalledPackages = KnownTtsEnginePackages.filter { isPackageInstalled(it) }
+    return (queriedPackages + knownInstalledPackages).distinct()
+}
 
 private fun ReaderPageAnchor.isAfter(other: ReaderPageAnchor): Boolean =
     paragraphIndex > other.paragraphIndex ||
@@ -1062,7 +1082,12 @@ private fun ReaderScreen(
         ttsReady = false
         ttsStatusText = "TTS 正在初始化"
         var engine: TextToSpeech? = null
-        val engineCandidates = (listOf<String?>(null) + context.installedTtsEnginePackages())
+        val engineCandidates = buildList<String?> {
+            add(context.defaultTtsEnginePackage())
+            add(null)
+            addAll(context.installedTtsEnginePackages())
+        }
+            .filter { it == null || it.isNotBlank() }
             .distinct()
         var engineCandidateIndex = 0
 
@@ -1143,7 +1168,12 @@ private fun ReaderScreen(
                 )
                 val availableVoices = activeEngine.availableLocalEnglishAccents()
                 if (availableVoices.isEmpty()) {
-                    tryNextTtsEngineOrFail("手机 TTS 没有本地英文语音，请在系统文字转语音中安装英文语音包")
+                    mainHandler.post {
+                        tts = activeEngine
+                        ttsVoices = emptyMap()
+                        ttsReady = true
+                        ttsStatusText = "TTS 引擎已就绪，但未检测到本地英文语音，请在系统文字转语音中把语言或音色改为英文"
+                    }
                 } else {
                     val nextAccent = when {
                         ttsAccent in availableVoices.keys -> ttsAccent
@@ -1394,14 +1424,6 @@ private fun ReaderScreen(
                                 Toast.makeText(context, ttsStatusText, Toast.LENGTH_SHORT).show()
                             }
 
-                            ttsAccent !in ttsVoices.keys -> {
-                                Toast.makeText(
-                                    context,
-                                    "手机未安装${ttsAccent.label}英文语音，请在系统文字转语音中安装",
-                                    Toast.LENGTH_SHORT,
-                                ).show()
-                            }
-
                             else -> {
                                 val voice = ttsVoices[ttsAccent]
                                 val ready = if (voice != null) {
@@ -1412,7 +1434,7 @@ private fun ReaderScreen(
                                 if (!ready) {
                                     Toast.makeText(
                                         context,
-                                        "${ttsAccent.label}语音不可用，请检查系统文字转语音设置",
+                                        "系统 TTS 引擎可用，但没有${ttsAccent.label}英文语音，请在文字转语音的语言或音色里选择英文",
                                         Toast.LENGTH_SHORT,
                                     ).show()
                                     return@WordLookupPanel
@@ -1434,6 +1456,7 @@ private fun ReaderScreen(
                 )
             } ?: translationText?.let { text ->
                 TranslationResultPanel(
+                    sourceText = selectedText,
                     text = text,
                     loading = translationLoading,
                     isError = translationIsError,
@@ -1649,9 +1672,11 @@ private fun ReaderPageSurface(
     Box(
         modifier = modifier
             .background(MaterialTheme.colorScheme.background)
-            .pointerInput(page.index, pageCount, titleTapHeight) {
+            .pointerInput(page.index, pageCount, titleTapHeight, selectedText.isNotBlank()) {
                 detectReaderPageTapGestures(
                     titleTapHeight = titleTapHeight,
+                    hasSelection = selectedText.isNotBlank(),
+                    onClearSelection = onClearSelection,
                     onPreviousPage = onPreviousPage,
                     onNextPage = onNextPage,
                 )
@@ -1850,6 +1875,8 @@ private fun SelectionHandle(
 
 private suspend fun PointerInputScope.detectReaderPageTapGestures(
     titleTapHeight: Float,
+    hasSelection: Boolean,
+    onClearSelection: () -> Unit,
     onPreviousPage: () -> Unit,
     onNextPage: () -> Unit,
 ) {
@@ -1862,6 +1889,10 @@ private suspend fun PointerInputScope.detectReaderPageTapGestures(
         val position = up.position
         when {
             position.y <= titleTapHeight -> Unit
+            hasSelection -> {
+                up.consume()
+                onClearSelection()
+            }
             position.x < size.width * 0.28f -> onPreviousPage()
             position.x > size.width * 0.72f -> onNextPage()
         }
@@ -1891,7 +1922,7 @@ private suspend fun PointerInputScope.detectReaderTextGestures(
         var pointerUp = false
 
         try {
-            val wordLookupDelayMillis = 2_000L
+            val wordLookupDelayMillis = 1_000L
             var releasedBeforeLookup = false
             withTimeoutOrNull(wordLookupDelayMillis) {
                 while (true) {
@@ -2525,12 +2556,15 @@ private fun LookupText(
 
 @Composable
 private fun TranslationResultPanel(
+    sourceText: String,
     text: String,
     loading: Boolean,
     isError: Boolean,
     onAddNote: (() -> Unit)?,
     onClose: () -> Unit,
 ) {
+    val showComparison = sourceText.isNotBlank() && LocalConfiguration.current.screenWidthDp >= 700
+    val contentColor = if (isError) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurface
     Surface(
         tonalElevation = 6.dp,
         shadowElevation = 8.dp,
@@ -2549,12 +2583,35 @@ private fun TranslationResultPanel(
             } else {
                 Icon(Icons.Filled.Translate, contentDescription = null, modifier = Modifier.size(22.dp))
             }
-            Text(
-                text = text,
-                style = MaterialTheme.typography.bodyLarge,
-                color = if (isError) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(1f),
-            )
+            if (showComparison) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text("原文", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(sourceText, style = MaterialTheme.typography.bodyMedium, color = contentColor)
+                    }
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text("译文", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(text, style = MaterialTheme.typography.bodyMedium, color = contentColor)
+                    }
+                }
+            } else {
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = contentColor,
+                    modifier = Modifier.weight(1f),
+                )
+            }
             if (onAddNote != null) {
                 IconButton(
                     onClick = onAddNote,

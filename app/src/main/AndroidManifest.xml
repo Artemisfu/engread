@@ -2,6 +2,16 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+        <package android:name="com.oplus.ttsaccessibilityengine" />
+        <package android:name="com.google.android.tts" />
+        <package android:name="com.google.android.googlequicksearchbox" />
+        <package android:name="com.heytap.speechassist" />
+    </queries>
+
     <application
         android:allowBackup="true"
         android:fullBackupContent="true"
