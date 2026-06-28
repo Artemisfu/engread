@@ -3,11 +3,13 @@
 .idea/
 build/
 local.properties
+keystore.properties
 captures/
 *.iml
 app/build/
 app/.cxx/
 .local-toolchain/
+.signing/
 .DS_Store
 *.apk
 *.aab

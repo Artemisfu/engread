@@ -1,8 +1,30 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+val keystoreProperties = Properties()
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
+}
+
+fun signingEnvName(name: String): String =
+    "ENGREAD_" + name.replace(Regex("([a-z])([A-Z])"), "$1_$2").uppercase()
+
+fun signingProperty(name: String): String? =
+    keystoreProperties.getProperty(name)
+        ?: System.getenv(signingEnvName(name))
+
+val releaseSigningConfigured = listOf(
+    signingProperty("storeFile"),
+    signingProperty("storePassword"),
+    signingProperty("keyAlias"),
+    signingProperty("keyPassword"),
+).all { !it.isNullOrBlank() }
 
 android {
     namespace = "com.engread.app"
@@ -20,6 +42,26 @@ android {
 
     buildFeatures {
         compose = true
+    }
+
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            create("release") {
+                storeFile = rootProject.file(signingProperty("storeFile")!!)
+                storePassword = signingProperty("storePassword")
+                keyAlias = signingProperty("keyAlias")
+                keyPassword = signingProperty("keyPassword")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            if (releaseSigningConfigured) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+            isMinifyEnabled = false
+        }
     }
 
     compileOptions {
