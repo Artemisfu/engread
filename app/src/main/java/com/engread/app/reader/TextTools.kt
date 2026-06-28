@@ -21,6 +21,7 @@ data class WordEntry(
     val synonyms: List<String> = emptyList(),
     val usPhonetic: String = "",
     val ukPhonetic: String = "",
+    val detailsLoading: Boolean = false,
 )
 
 data class ReaderPage(

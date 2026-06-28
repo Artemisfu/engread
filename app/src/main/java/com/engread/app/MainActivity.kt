@@ -19,6 +19,12 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -121,6 +127,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
@@ -586,6 +593,22 @@ private fun WordEntry.ukIpa(): String =
 
 private fun WordEntry.historyPhoneticText(): String =
     "美 ${usIpa()} · 英 ${ukIpa()}"
+
+private fun WordEntry.needsLlmWordDetails(): Boolean =
+    root.isBlank() || cognates.isEmpty() || synonyms.isEmpty() || usPhonetic.isBlank() || ukPhonetic.isBlank()
+
+private fun WordEntry.mergeLlmWordDetails(enriched: WordEntry): WordEntry =
+    copy(
+        word = enriched.word.ifBlank { word },
+        phonetic = phonetic.takeUnless { it.isBlank() || it == "未知" } ?: enriched.phonetic,
+        meaning = meaning.takeIf { it.isNotBlank() && it != "暂无释义" } ?: enriched.meaning,
+        root = root.ifBlank { enriched.root },
+        cognates = cognates.ifEmpty { enriched.cognates },
+        synonyms = synonyms.ifEmpty { enriched.synonyms },
+        usPhonetic = usPhonetic.ifBlank { enriched.usPhonetic },
+        ukPhonetic = ukPhonetic.ifBlank { enriched.ukPhonetic },
+        detailsLoading = false,
+    )
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1375,15 +1398,43 @@ private fun ReaderScreen(
         }
         val dictionaryEntry = runCatching { dictionary.lookup(normalizedWord) }.getOrNull()
         if (dictionaryEntry != null) {
-            wordStack = if (replaceStack) listOf(dictionaryEntry) else wordStack + dictionaryEntry
+            val shouldEnrichDetails = dictionaryEntry.needsLlmWordDetails() && settings.translation.isConfigured
+            val targetIndex = if (replaceStack) 0 else wordStack.size
+            val immediateEntry = dictionaryEntry.copy(detailsLoading = shouldEnrichDetails)
+            wordStack = if (replaceStack) listOf(immediateEntry) else wordStack + immediateEntry
             translationText = null
             onAddLookupHistory(
                 paragraphIndex,
                 LookupHistoryType.WORD,
-                dictionaryEntry.word,
-                dictionaryEntry.toLookupHistoryText(),
-                dictionaryEntry.historyPhoneticText(),
+                immediateEntry.word,
+                immediateEntry.toLookupHistoryText(),
+                immediateEntry.historyPhoneticText(),
             )
+            if (shouldEnrichDetails) {
+                scope.launch {
+                    val result = runCatching {
+                        OpenAiWordLookup.lookup(normalizedWord, page.text, settings.translation)
+                    }
+                    result.onSuccess { enriched ->
+                        if (requestSerial != wordLookupSerial) return@onSuccess
+                        val merged = immediateEntry.mergeLlmWordDetails(enriched)
+                        wordStack = wordStack.replaceAtOrAppend(targetIndex, merged)
+                        onAddLookupHistory(
+                            paragraphIndex,
+                            LookupHistoryType.WORD,
+                            merged.word,
+                            merged.toLookupHistoryText(),
+                            merged.historyPhoneticText(),
+                        )
+                    }.onFailure {
+                        if (requestSerial != wordLookupSerial) return@onFailure
+                        wordStack = wordStack.replaceAtOrAppend(
+                            targetIndex,
+                            immediateEntry.copy(detailsLoading = false),
+                        )
+                    }
+                }
+            }
             return
         }
         val loadingEntry = WordEntry(
@@ -2554,6 +2605,8 @@ private fun WordLookupPanel(
                         text = entry.root,
                         onLookupWord = onLookupWord,
                     )
+                } else if (entry.detailsLoading) {
+                    WordInfoSkeleton(title = "词根")
                 }
                 if (entry.cognates.isNotEmpty()) {
                     WordListSection(
@@ -2561,6 +2614,8 @@ private fun WordLookupPanel(
                         words = entry.cognates,
                         onLookupWord = onLookupWord,
                     )
+                } else if (entry.detailsLoading) {
+                    WordChipListSkeleton(title = "同源词")
                 }
                 if (entry.synonyms.isNotEmpty()) {
                     WordListSection(
@@ -2568,10 +2623,88 @@ private fun WordLookupPanel(
                         words = entry.synonyms,
                         onLookupWord = onLookupWord,
                     )
+                } else if (entry.detailsLoading) {
+                    WordChipListSkeleton(title = "近义词")
                 }
             }
         }
     }
+}
+
+@Composable
+private fun ShimmerBrush(): Brush {
+    val transition = rememberInfiniteTransition(label = "shimmer")
+    val progress by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1_100, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "shimmer-progress",
+    )
+    val base = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.58f)
+    val highlight = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f)
+    val start = -260f + progress * 520f
+    return Brush.linearGradient(
+        colors = listOf(base, highlight, base),
+        start = Offset(start, 0f),
+        end = Offset(start + 260f, 120f),
+    )
+}
+
+@Composable
+private fun WordInfoSkeleton(title: String) {
+    val brush = ShimmerBrush()
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        WordSectionTitle(title)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(0.86f)
+                .height(16.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(brush),
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(0.64f)
+                .height(16.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(brush),
+        )
+    }
+}
+
+@Composable
+private fun WordChipListSkeleton(title: String) {
+    val brush = ShimmerBrush()
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        WordSectionTitle(title)
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            listOf(58.dp, 72.dp, 64.dp).forEach { width ->
+                Box(
+                    modifier = Modifier
+                        .width(width)
+                        .height(30.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(brush),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun WordSectionTitle(title: String) {
+    Text(
+        text = title,
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.primary,
+        fontWeight = FontWeight.Bold,
+    )
 }
 
 @Composable
@@ -2581,12 +2714,7 @@ private fun WordInfoSection(
     onLookupWord: (String) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.primary,
-            fontWeight = FontWeight.Bold,
-        )
+        WordSectionTitle(title)
         LookupText(
             text = text,
             style = MaterialTheme.typography.bodyLarge,
@@ -2602,12 +2730,7 @@ private fun WordListSection(
     onLookupWord: (String) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.primary,
-            fontWeight = FontWeight.Bold,
-        )
+        WordSectionTitle(title)
         Row(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
