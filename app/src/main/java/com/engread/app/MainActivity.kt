@@ -39,6 +39,7 @@ import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -142,6 +143,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextLayoutResult
@@ -214,6 +216,9 @@ import org.commonmark.node.StrongEmphasis
 import org.commonmark.node.Text as MarkdownTextNode
 import org.commonmark.node.ThematicBreak
 import org.commonmark.parser.Parser
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.roundToInt
@@ -774,7 +779,23 @@ private fun EngReadApp() {
                     },
                     onSendMessage = { book, text -> sendBookChatMessage(book, text) },
                     onRefreshSuggestions = { book -> requestChatSuggestions(book) },
-                    onOpenReader = { book -> screen = AppScreen.Reader(book.id) },
+                    onOpenReader = { book, paragraphIndex ->
+                        val targetParagraph = paragraphIndex?.coerceIn(0, (book.paragraphs.size - 1).coerceAtLeast(0))
+                        if (targetParagraph != null) {
+                            val now = System.currentTimeMillis()
+                            books = books.map { item ->
+                                if (item.id == book.id) {
+                                    item.copy(lastReadParagraph = targetParagraph, updatedAt = now)
+                                } else {
+                                    item
+                                }
+                            }
+                            scope.launch(Dispatchers.IO) {
+                                repository.updateProgress(book.id, targetParagraph)
+                            }
+                        }
+                        screen = AppScreen.Reader(book.id)
+                    },
                     onAddLookupHistory = { activeBook, paragraphIndex, type, sourceText, resultText, phonetic ->
                         scope.launch(Dispatchers.IO) {
                             repository.addLookupHistory(
@@ -1096,7 +1117,7 @@ private fun ChatScreen(
     bottomBar: @Composable () -> Unit,
     onSendMessage: (Book, String) -> Unit,
     onRefreshSuggestions: (Book) -> Unit,
-    onOpenReader: (Book) -> Unit,
+    onOpenReader: (Book, Int?) -> Unit,
     onAddLookupHistory: (Book, Int, LookupHistoryType, String, String, String) -> Unit,
 ) {
     var selectedBookId by rememberSaveable { mutableStateOf("") }
@@ -1131,6 +1152,7 @@ private fun ChatScreen(
     var wordStack by remember(selectedBookId) { mutableStateOf<List<WordEntry>>(emptyList()) }
     var wordLookupSerial by remember(selectedBookId) { mutableStateOf(0) }
     var ttsAccent by rememberSaveable { mutableStateOf(TtsAccent.US) }
+    var tocMenuOpen by rememberSaveable(selectedBookId) { mutableStateOf(false) }
 
     fun closeTopWordCard() {
         val nextStack = wordStack.dropLast(1)
@@ -1308,13 +1330,39 @@ private fun ChatScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp),
-                        horizontalArrangement = Arrangement.End,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
                         AssistChip(
-                            onClick = { onOpenReader(book) },
+                            onClick = { tocMenuOpen = true },
+                            label = { Text("目录定位") },
+                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.Notes, contentDescription = null) },
+                        )
+                        AssistChip(
+                            onClick = { onOpenReader(book, null) },
                             label = { Text("继续读") },
                             leadingIcon = { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null) },
                         )
+                    }
+                    DropdownMenu(
+                        expanded = tocMenuOpen,
+                        onDismissRequest = { tocMenuOpen = false },
+                    ) {
+                        book.readerChapters().take(80).forEach { chapter ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text = chapter.title,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                },
+                                onClick = {
+                                    tocMenuOpen = false
+                                    onOpenReader(book, chapter.paragraphIndex)
+                                },
+                            )
+                        }
                     }
                 }
                 LazyColumn(
@@ -1334,6 +1382,9 @@ private fun ChatScreen(
                         ChatMessageBubble(
                             message = message,
                             onLookupWord = { lookupChatWord(it) },
+                            onOpenAnchor = { paragraphIndex ->
+                                selectedBook?.let { onOpenReader(it, paragraphIndex) }
+                            },
                         )
                     }
                     if (isSending) {
@@ -1518,8 +1569,12 @@ private fun ChatSuggestionsPanel(
 private fun ChatMessageBubble(
     message: ChatMessage,
     onLookupWord: (String) -> Unit,
+    onOpenAnchor: (Int) -> Unit,
 ) {
     val fromUser = message.role == ChatRole.USER
+    var detailsVisible by remember(message.id) { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (fromUser) Arrangement.End else Arrangement.Start,
@@ -1527,11 +1582,15 @@ private fun ChatMessageBubble(
         Surface(
             shape = RoundedCornerShape(8.dp),
             color = if (fromUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
-            modifier = Modifier.fillMaxWidth(0.86f),
+            modifier = Modifier
+                .fillMaxWidth(0.86f)
+                .pointerInput(message.id) {
+                    detectTapGestures(onTap = { detailsVisible = !detailsVisible })
+                },
         ) {
             Column(
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 if (!fromUser) {
                     Text(
@@ -1545,10 +1604,42 @@ private fun ChatMessageBubble(
                     markdown = message.content,
                     color = MaterialTheme.colorScheme.onSurface,
                     onLookupWord = onLookupWord,
+                    onOpenAnchor = onOpenAnchor,
                 )
+                if (detailsVisible) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = formatChatMessageTime(message.createdAt),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        TextButton(
+                            onClick = {
+                                clipboard.setText(AnnotatedString(message.content))
+                                Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                        ) {
+                            Text("复制")
+                        }
+                    }
+                }
             }
         }
     }
+}
+
+private fun formatChatMessageTime(timestamp: Long): String {
+    val now = Calendar.getInstance()
+    val target = Calendar.getInstance().apply { timeInMillis = timestamp }
+    val sameDay = now.get(Calendar.YEAR) == target.get(Calendar.YEAR) &&
+        now.get(Calendar.DAY_OF_YEAR) == target.get(Calendar.DAY_OF_YEAR)
+    val pattern = if (sameDay) "HH:mm" else "yyyy年MM月dd日 HH:mm"
+    return SimpleDateFormat(pattern, Locale.getDefault()).format(Date(timestamp))
 }
 
 private val chatMarkdownParser: Parser by lazy {
@@ -1557,11 +1648,14 @@ private val chatMarkdownParser: Parser by lazy {
         .build()
 }
 
+private const val ChatAnchorAnnotation = "engread-paragraph-anchor"
+
 @Composable
 private fun MarkdownText(
     markdown: String,
     color: Color,
     onLookupWord: (String) -> Unit = {},
+    onOpenAnchor: (Int) -> Unit = {},
 ) {
     val document = remember(markdown) { chatMarkdownParser.parse(markdown.trim()) }
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -1569,6 +1663,7 @@ private fun MarkdownText(
             parent = document,
             color = color,
             onLookupWord = onLookupWord,
+            onOpenAnchor = onOpenAnchor,
         )
     }
 }
@@ -1582,6 +1677,7 @@ private fun MarkdownInlineText(
     fontWeight: FontWeight? = null,
     textAlign: TextAlign? = null,
     onLookupWord: (String) -> Unit,
+    onOpenAnchor: (Int) -> Unit = {},
 ) {
     var layoutResult by remember(annotated.text) { mutableStateOf<TextLayoutResult?>(null) }
     Text(
@@ -1592,6 +1688,16 @@ private fun MarkdownInlineText(
         textAlign = textAlign,
         modifier = modifier.pointerInput(annotated.text) {
             detectTapGestures(
+                onTap = { position ->
+                    val offset = layoutResult?.getOffsetForPosition(position) ?: return@detectTapGestures
+                    val paragraphIndex = annotated
+                        .getStringAnnotations(ChatAnchorAnnotation, offset, offset)
+                        .firstOrNull()
+                        ?.item
+                        ?.toIntOrNull()
+                        ?: return@detectTapGestures
+                    onOpenAnchor(paragraphIndex)
+                },
                 onLongPress = { position ->
                     val offset = layoutResult?.getOffsetForPosition(position) ?: return@detectTapGestures
                     val word = extractWordAt(annotated.text, offset) ?: return@detectTapGestures
@@ -1608,12 +1714,14 @@ private fun MarkdownNodeChildren(
     parent: Node,
     color: Color,
     onLookupWord: (String) -> Unit,
+    onOpenAnchor: (Int) -> Unit,
 ) {
     parent.childNodes().forEach { child ->
         MarkdownBlockNode(
             node = child,
             color = color,
             onLookupWord = onLookupWord,
+            onOpenAnchor = onOpenAnchor,
         )
     }
 }
@@ -1623,6 +1731,7 @@ private fun MarkdownBlockNode(
     node: Node,
     color: Color,
     onLookupWord: (String) -> Unit,
+    onOpenAnchor: (Int) -> Unit,
 ) {
     when (node) {
         is Paragraph -> {
@@ -1631,6 +1740,7 @@ private fun MarkdownBlockNode(
                 style = MaterialTheme.typography.bodyMedium,
                 color = color,
                 onLookupWord = onLookupWord,
+                onOpenAnchor = onOpenAnchor,
             )
         }
 
@@ -1645,6 +1755,7 @@ private fun MarkdownBlockNode(
                 color = color,
                 fontWeight = FontWeight.Bold,
                 onLookupWord = onLookupWord,
+                onOpenAnchor = onOpenAnchor,
             )
         }
 
@@ -1660,6 +1771,7 @@ private fun MarkdownBlockNode(
                         node = child,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         onLookupWord = onLookupWord,
+                        onOpenAnchor = onOpenAnchor,
                     )
                 }
             }
@@ -1670,6 +1782,7 @@ private fun MarkdownBlockNode(
                 list = node,
                 color = color,
                 onLookupWord = onLookupWord,
+                onOpenAnchor = onOpenAnchor,
             )
         }
 
@@ -1678,6 +1791,7 @@ private fun MarkdownBlockNode(
                 list = node,
                 color = color,
                 onLookupWord = onLookupWord,
+                onOpenAnchor = onOpenAnchor,
             )
         }
 
@@ -1698,6 +1812,7 @@ private fun MarkdownBlockNode(
                 table = node,
                 color = color,
                 onLookupWord = onLookupWord,
+                onOpenAnchor = onOpenAnchor,
             )
         }
 
@@ -1709,6 +1824,7 @@ private fun MarkdownBlockNode(
                     parent = node,
                     color = color,
                     onLookupWord = onLookupWord,
+                    onOpenAnchor = onOpenAnchor,
                 )
             }
         }
@@ -1720,6 +1836,7 @@ private fun MarkdownListBlock(
     list: Node,
     color: Color,
     onLookupWord: (String) -> Unit,
+    onOpenAnchor: (Int) -> Unit,
 ) {
     val startNumber = (list as? OrderedList)?.markerStartNumber ?: 1
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -1739,6 +1856,7 @@ private fun MarkdownListBlock(
                             node = child,
                             color = color,
                             onLookupWord = onLookupWord,
+                            onOpenAnchor = onOpenAnchor,
                         )
                     }
                 }
@@ -1752,6 +1870,7 @@ private fun MarkdownTableBlock(
     table: TableBlock,
     color: Color,
     onLookupWord: (String) -> Unit,
+    onOpenAnchor: (Int) -> Unit,
 ) {
     val rows = remember(table) { table.toMarkdownRows() }
     val columnCount = (rows.maxOfOrNull { it.size } ?: 0).coerceAtLeast(1)
@@ -1759,12 +1878,10 @@ private fun MarkdownTableBlock(
         shape = RoundedCornerShape(8.dp),
         color = MaterialTheme.colorScheme.surface,
         tonalElevation = 1.dp,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.horizontalScroll(rememberScrollState()),
     ) {
         Column(
-            modifier = Modifier
-                .horizontalScroll(rememberScrollState())
-                .padding(1.dp),
+            modifier = Modifier.padding(1.dp),
         ) {
             rows.forEach { row ->
                 MarkdownTableRow(
@@ -1772,6 +1889,7 @@ private fun MarkdownTableBlock(
                     columnCount = columnCount,
                     color = color,
                     onLookupWord = onLookupWord,
+                    onOpenAnchor = onOpenAnchor,
                 )
             }
         }
@@ -1784,14 +1902,16 @@ private fun MarkdownTableRow(
     columnCount: Int,
     color: Color,
     onLookupWord: (String) -> Unit,
+    onOpenAnchor: (Int) -> Unit,
 ) {
-    Row {
+    Row(modifier = Modifier.height(IntrinsicSize.Min)) {
         repeat(columnCount) { index ->
             val cell = cells.getOrNull(index)
             val header = cell?.header == true
             Box(
                 modifier = Modifier
                     .width(150.dp)
+                    .fillMaxHeight()
                     .border(1.dp, MaterialTheme.colorScheme.outlineVariant)
                     .background(if (header) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface)
                     .padding(horizontal = 9.dp, vertical = 8.dp),
@@ -1804,6 +1924,7 @@ private fun MarkdownTableRow(
                     textAlign = cell?.alignment.toTextAlign(),
                     modifier = Modifier.fillMaxWidth(),
                     onLookupWord = onLookupWord,
+                    onOpenAnchor = onOpenAnchor,
                 )
             }
         }
@@ -1871,20 +1992,32 @@ private fun AnnotatedString.Builder.appendMarkdownInline(node: Node) {
             pop()
         }
         is Link -> {
+            val paragraphIndex = node.destination.toEngReadParagraphIndex()
+            if (paragraphIndex != null) {
+                pushStringAnnotation(ChatAnchorAnnotation, paragraphIndex.toString())
+            }
             pushStyle(
                 SpanStyle(
-                    color = Color(0xFF3E8E0F),
+                    color = Color(0xFF58CC02),
                     textDecoration = TextDecoration.Underline,
                 ),
             )
             node.childNodes().forEach { appendMarkdownInline(it) }
             pop()
+            if (paragraphIndex != null) pop()
         }
         is SoftLineBreak -> append(" ")
         is HardLineBreak -> append("\n")
         is HtmlInline -> append(node.literal)
         else -> node.childNodes().forEach { appendMarkdownInline(it) }
     }
+}
+
+private fun String.toEngReadParagraphIndex(): Int? {
+    val trimmed = trim()
+    val prefix = "engread://paragraph/"
+    if (!trimmed.startsWith(prefix)) return null
+    return trimmed.removePrefix(prefix).takeWhile { it.isDigit() }.toIntOrNull()
 }
 
 private fun Node.childNodes(): List<Node> =
