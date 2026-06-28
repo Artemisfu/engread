@@ -19,6 +19,8 @@ data class WordEntry(
     val root: String = "",
     val cognates: List<String> = emptyList(),
     val synonyms: List<String> = emptyList(),
+    val usPhonetic: String = "",
+    val ukPhonetic: String = "",
 )
 
 data class ReaderPage(
@@ -373,8 +375,8 @@ object OpenAiWordLookup {
                             .put(
                                     "content",
                                     "You are an English dictionary API for Chinese readers. Return only valid minified JSON. " +
-                                    "The JSON schema is exactly: {\"word\":\"string\",\"phonetic\":\"string\",\"meaning\":\"string\",\"root\":\"string\",\"cognates\":[\"string\"],\"synonyms\":[\"string\"]}. " +
-                                    "phonetic must be IPA wrapped in slashes when known. meaning must be concise Simplified Chinese definitions, " +
+                                    "The JSON schema is exactly: {\"word\":\"string\",\"phonetic\":\"string\",\"usPhonetic\":\"string\",\"ukPhonetic\":\"string\",\"meaning\":\"string\",\"root\":\"string\",\"cognates\":[\"string\"],\"synonyms\":[\"string\"]}. " +
+                                    "phonetic, usPhonetic, and ukPhonetic must be IPA wrapped in slashes when known. phonetic may duplicate usPhonetic when only one IPA is known. meaning must be concise Simplified Chinese definitions, " +
                                     "separated with Chinese semicolons. root must explain useful roots/prefixes/suffixes in Simplified Chinese. " +
                                     "cognates must list 3-6 English same-root or related-family words when useful. synonyms must list 3-6 English synonyms. " +
                                     "Use empty string or empty arrays when not useful. Do not return markdown or extra keys.",
@@ -398,6 +400,8 @@ object OpenAiWordLookup {
                 root = root.optString("root", "").trim(),
                 cognates = root.optStringList("cognates"),
                 synonyms = root.optStringList("synonyms"),
+                usPhonetic = root.optString("usPhonetic", "").trim(),
+                ukPhonetic = root.optString("ukPhonetic", "").trim(),
             )
         }
 }

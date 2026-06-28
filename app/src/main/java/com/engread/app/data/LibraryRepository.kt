@@ -229,6 +229,11 @@ class LibraryRepository(
         saveLookupHistory(emptyList())
     }
 
+    @Synchronized
+    fun deleteLookupHistory(id: String) {
+        saveLookupHistory(getLookupHistory().filterNot { it.id == id })
+    }
+
     fun buildNotesMarkdown(notes: List<ReaderNote> = getNotes()): String {
         if (notes.isEmpty()) {
             return "# EngRead Notes\n\n暂无笔记。\n"

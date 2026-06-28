@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -478,6 +479,15 @@ private fun EngReadApp() {
                             showMessage("已删除 ${selectedNotes.size} 条笔记")
                         }
                     },
+                    onDeleteLookupHistory = { selectedEntries ->
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                selectedEntries.forEach { repository.deleteLookupHistory(it.id) }
+                            }
+                            refreshAll()
+                            showMessage("已删除 ${selectedEntries.size} 条查词记录")
+                        }
+                    },
                     onClearHistory = {
                         scope.launch {
                             withContext(Dispatchers.IO) { repository.clearLookupHistory() }
@@ -567,6 +577,15 @@ private fun WordEntry.toLookupHistoryText(): String =
         if (cognates.isNotEmpty()) append("\n同源词：").append(cognates.joinToString("；"))
         if (synonyms.isNotEmpty()) append("\n近义词：").append(synonyms.joinToString("；"))
     }
+
+private fun WordEntry.usIpa(): String =
+    usPhonetic.ifBlank { phonetic }.ifBlank { "未知" }
+
+private fun WordEntry.ukIpa(): String =
+    ukPhonetic.ifBlank { phonetic }.ifBlank { "未知" }
+
+private fun WordEntry.historyPhoneticText(): String =
+    "美 ${usIpa()} · 英 ${ukIpa()}"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1050,10 +1069,12 @@ private fun ReaderScreen(
     var wordStack by remember(book.id) { mutableStateOf<List<WordEntry>>(emptyList()) }
     var wordLookupSerial by remember(book.id) { mutableStateOf(0) }
     var translationText by remember(book.id) { mutableStateOf<String?>(null) }
+    var translationSourceText by remember(book.id) { mutableStateOf("") }
     var translationLoading by remember(book.id) { mutableStateOf(false) }
     var translationIsError by remember(book.id) { mutableStateOf(false) }
     var selectionStart by remember(page.index) { mutableStateOf<Int?>(null) }
     var selectionEnd by remember(page.index) { mutableStateOf<Int?>(null) }
+    var selectionTipVisible by remember(page.index) { mutableStateOf(false) }
     var wordSelectionRange by remember(page.index) { mutableStateOf<IntRange?>(null) }
     var tts by remember { mutableStateOf<TextToSpeech?>(null) }
     var ttsReady by remember { mutableStateOf(false) }
@@ -1361,7 +1382,7 @@ private fun ReaderScreen(
                 LookupHistoryType.WORD,
                 dictionaryEntry.word,
                 dictionaryEntry.toLookupHistoryText(),
-                dictionaryEntry.phonetic,
+                dictionaryEntry.historyPhoneticText(),
             )
             return
         }
@@ -1385,7 +1406,7 @@ private fun ReaderScreen(
                     LookupHistoryType.WORD,
                     entry.word,
                     entry.toLookupHistoryText(),
-                    entry.phonetic,
+                    entry.historyPhoneticText(),
                 )
             }.onFailure { error ->
                 if (replaceStack && requestSerial != wordLookupSerial) return@onFailure
@@ -1456,14 +1477,14 @@ private fun ReaderScreen(
                 )
             } ?: translationText?.let { text ->
                 TranslationResultPanel(
-                    sourceText = selectedText,
+                    sourceText = translationSourceText.ifBlank { selectedText },
                     text = text,
                     loading = translationLoading,
                     isError = translationIsError,
-                    onAddNote = if (selectedText.isNotBlank()) {
+                    onAddNote = if (translationSourceText.isNotBlank() || selectedText.isNotBlank()) {
                         {
                             openNoteDialog(
-                                sourceText = selectedText,
+                                sourceText = translationSourceText.ifBlank { selectedText },
                                 knownTranslation = text.takeUnless { translationLoading || translationIsError },
                             )
                         }
@@ -1472,6 +1493,7 @@ private fun ReaderScreen(
                     },
                     onClose = {
                         translationText = null
+                        translationSourceText = ""
                         translationLoading = false
                         translationIsError = false
                     },
@@ -1507,14 +1529,19 @@ private fun ReaderScreen(
                 onSelectionChange = { start, end ->
                     selectionStart = start
                     selectionEnd = end
+                    selectionTipVisible = true
                     clearWordLookup()
                 },
+                selectionTipVisible = selectionTipVisible,
+                onSelectionTap = { selectionTipVisible = true },
                 selectedText = selectedText,
                 onTranslateSelection = {
                     if (selectedText.isNotBlank()) {
                         translationText = "查阅中..."
+                        translationSourceText = selectedText
                         translationLoading = true
                         translationIsError = false
+                        selectionTipVisible = false
                         clearWordLookup()
                         scope.launch {
                             val result = runCatching {
@@ -1540,12 +1567,14 @@ private fun ReaderScreen(
                 },
                 onNoteSelection = {
                     if (selectedText.isNotBlank()) {
+                        selectionTipVisible = false
                         openNoteDialog(selectedText)
                     }
                 },
                 onClearSelection = {
                     selectionStart = null
                     selectionEnd = null
+                    selectionTipVisible = false
                 },
             )
             if (wordStack.isNotEmpty()) {
@@ -1626,6 +1655,7 @@ private fun ReaderPageSurface(
     selectionRange: IntRange?,
     wordSelectionRange: IntRange?,
     selectedText: String,
+    selectionTipVisible: Boolean,
     modifier: Modifier = Modifier,
     onPreviousPage: () -> Unit,
     onNextPage: () -> Unit,
@@ -1634,6 +1664,7 @@ private fun ReaderPageSurface(
     onOpenPageSettings: () -> Unit,
     onWordLongPress: (String, Int, IntRange?) -> Unit,
     onSelectionChange: (Int, Int) -> Unit,
+    onSelectionTap: () -> Unit,
     onTranslateSelection: () -> Unit,
     onNoteSelection: () -> Unit,
     onClearSelection: () -> Unit,
@@ -1726,8 +1757,10 @@ private fun ReaderPageSurface(
                             text = page.text,
                             getLayoutResult = { layoutResult },
                             canLookupWord = { selectedText.isBlank() },
+                            currentSelectionRange = { selectionRange },
                             onWordLongPress = onWordLongPress,
                             paragraphIndexForOffset = { page.paragraphIndexForDisplayOffset(it) },
+                            onSelectionTap = onSelectionTap,
                             onSelectionGestureStart = {},
                             onSelectionChange = onSelectionChange,
                             onSelectionGestureEnd = {},
@@ -1738,13 +1771,6 @@ private fun ReaderPageSurface(
 
             Spacer(Modifier.weight(1f))
 
-            if (selectedText.isNotBlank()) {
-                SelectionActionBar(
-                    onTranslate = onTranslateSelection,
-                    onAddNote = onNoteSelection,
-                    onClear = onClearSelection,
-                )
-            }
         }
 
         SelectionHandles(
@@ -1754,6 +1780,16 @@ private fun ReaderPageSurface(
             selectionRange = selectionRange,
             onSelectionChange = onSelectionChange,
         )
+
+        if (selectedText.isNotBlank() && selectionTipVisible) {
+            SelectionTip(
+                textOrigin = textOrigin,
+                layoutResult = layoutResult,
+                selectionRange = selectionRange,
+                onTranslate = onTranslateSelection,
+                onAddNote = onNoteSelection,
+            )
+        }
 
         if (controlsVisible) {
             ReaderTopControls(
@@ -1793,7 +1829,8 @@ private fun SelectionHandles(
     if (text.isBlank()) return
 
     val startOffset = range.first.coerceIn(0, text.lastIndex)
-    val endExclusive = (range.last + 1).coerceIn(0, text.length)
+    val endInclusive = range.last.coerceIn(startOffset, text.lastIndex)
+    val endExclusive = (endInclusive + 1).coerceIn(0, text.length)
     val startRect = layout.getCursorRect(startOffset)
     val endRect = layout.getCursorRect(endExclusive)
     val startCursor = Offset(startRect.left, startRect.top)
@@ -1803,7 +1840,7 @@ private fun SelectionHandles(
         parentPosition = textOrigin + Offset(startRect.left, startRect.bottom),
         cursorPositionInText = startCursor,
         layoutResult = layout,
-        fixedOffset = range.last,
+        fixedOffset = endInclusive,
         isStart = true,
         onSelectionChange = onSelectionChange,
     )
@@ -1848,7 +1885,7 @@ private fun SelectionHandle(
                         if (isStart) {
                             onSelectionChange(offset, fixedOffset)
                         } else {
-                            onSelectionChange(fixedOffset, offset)
+                            onSelectionChange(fixedOffset, (offset - 1).coerceAtLeast(fixedOffset + 1))
                         }
                         change.consume()
                     },
@@ -1903,8 +1940,10 @@ private suspend fun PointerInputScope.detectReaderTextGestures(
     text: String,
     getLayoutResult: () -> TextLayoutResult?,
     canLookupWord: () -> Boolean,
+    currentSelectionRange: () -> IntRange?,
     onWordLongPress: (String, Int, IntRange?) -> Unit,
     paragraphIndexForOffset: (Int) -> Int,
+    onSelectionTap: () -> Unit,
     onSelectionGestureStart: () -> Unit,
     onSelectionChange: (Int, Int) -> Unit,
     onSelectionGestureEnd: () -> Unit,
@@ -1916,12 +1955,27 @@ private suspend fun PointerInputScope.detectReaderTextGestures(
         val word = extractWordAt(text, longPressOffset)
         val wordRange = wordRangeAt(text, longPressOffset)
         val paragraphRange = paragraphRangeAt(text, longPressOffset)
+        val sentenceRange = sentenceRangeAt(text, longPressOffset) ?: paragraphRange
         val pointerId = firstDown.id
         var selecting = false
         var wordLookupTriggered = false
         var pointerUp = false
 
         try {
+            currentSelectionRange()?.let { activeRange ->
+                val up = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                    waitForUpOrCancellation()
+                } ?: return@awaitEachGesture
+                if (!up.isConsumed) {
+                    val tapOffset = layout.getOffsetForPosition(up.position)
+                    if (tapOffset in activeRange) {
+                        firstDown.consume()
+                        up.consume()
+                        onSelectionTap()
+                    }
+                }
+                return@awaitEachGesture
+            }
             val wordLookupDelayMillis = 1_000L
             var releasedBeforeLookup = false
             withTimeoutOrNull(wordLookupDelayMillis) {
@@ -1938,17 +1992,17 @@ private suspend fun PointerInputScope.detectReaderTextGestures(
                     if (change.positionChangedIgnoreConsumed()) {
                         val movedEnough = (change.position - firstDown.position).getDistance() >
                             viewConfiguration.touchSlop
-                        if (!movedEnough || paragraphRange == null) continue
+                        if (!movedEnough || sentenceRange == null) continue
                         selecting = true
                         firstDown.consume()
                         change.consume()
                         onSelectionGestureStart()
-                        onSelectionChange(paragraphRange.first, paragraphRange.last)
+                        onSelectionChange(sentenceRange.first, sentenceRange.last)
                         val currentOffset = (getLayoutResult() ?: layout).getOffsetForPosition(change.position)
-                        val anchorOffset = if (currentOffset < paragraphRange.first) {
-                            paragraphRange.last
+                        val anchorOffset = if (currentOffset < sentenceRange.first) {
+                            sentenceRange.last
                         } else {
-                            paragraphRange.first
+                            sentenceRange.first
                         }
                         onSelectionChange(anchorOffset, currentOffset)
                         return@withTimeoutOrNull
@@ -1977,24 +2031,24 @@ private suspend fun PointerInputScope.detectReaderTextGestures(
                     change.consume()
                     continue
                 }
-                if (change.positionChangedIgnoreConsumed()) {
-                    val currentLayout = getLayoutResult() ?: continue
-                    if (!selecting) {
-                        val movedEnough = (change.position - firstDown.position).getDistance() >
-                            viewConfiguration.touchSlop
-                        if (!movedEnough || paragraphRange == null) continue
-                        selecting = true
-                        onSelectionGestureStart()
-                        onSelectionChange(paragraphRange.first, paragraphRange.last)
-                    }
-                    val currentOffset = currentLayout.getOffsetForPosition(change.position)
-                    val activeParagraphRange = paragraphRange ?: continue
-                    val anchorOffset = if (currentOffset < activeParagraphRange.first) {
-                        activeParagraphRange.last
-                    } else {
-                        activeParagraphRange.first
-                    }
-                    onSelectionChange(anchorOffset, currentOffset)
+                    if (change.positionChangedIgnoreConsumed()) {
+                        val currentLayout = getLayoutResult() ?: continue
+                        if (!selecting) {
+                            val movedEnough = (change.position - firstDown.position).getDistance() >
+                                viewConfiguration.touchSlop
+                            if (!movedEnough || sentenceRange == null) continue
+                            selecting = true
+                            onSelectionGestureStart()
+                            onSelectionChange(sentenceRange.first, sentenceRange.last)
+                        }
+                        val currentOffset = currentLayout.getOffsetForPosition(change.position)
+                        val activeSentenceRange = sentenceRange ?: continue
+                        val anchorOffset = if (currentOffset < activeSentenceRange.first) {
+                            activeSentenceRange.last
+                        } else {
+                            activeSentenceRange.first
+                        }
+                        onSelectionChange(anchorOffset, currentOffset)
                     change.consume()
                 }
             }
@@ -2016,6 +2070,41 @@ private fun paragraphRangeAt(text: String, offset: Int): IntRange? {
     if (end - start < 2) return null
     return start..(end - 1)
 }
+
+private fun sentenceRangeAt(text: String, offset: Int): IntRange? {
+    val paragraphRange = paragraphRangeAt(text, offset) ?: return null
+    val anchor = offset.coerceIn(paragraphRange.first, paragraphRange.last)
+    var start = paragraphRange.first
+    var index = anchor - 1
+    while (index >= paragraphRange.first) {
+        if (text[index].isSentenceTerminator()) {
+            start = index + 1
+            break
+        }
+        index -= 1
+    }
+    var end = paragraphRange.last
+    index = anchor
+    while (index <= paragraphRange.last) {
+        if (text[index].isSentenceTerminator()) {
+            end = index
+            while (end + 1 <= paragraphRange.last && text[end + 1].isClosingSentencePunctuation()) {
+                end += 1
+            }
+            break
+        }
+        index += 1
+    }
+    while (start <= end && text[start].isWhitespace()) start += 1
+    while (end >= start && text[end].isWhitespace()) end -= 1
+    return (start..end).takeIf { end - start >= 1 }
+}
+
+private fun Char.isSentenceTerminator(): Boolean =
+    this == '.' || this == '?' || this == '!' || this == ';' || this == '。' || this == '？' || this == '！'
+
+private fun Char.isClosingSentencePunctuation(): Boolean =
+    this == '"' || this == '\'' || this == '”' || this == '’' || this == ')' || this == ']' || this == '}'
 
 private fun wordRangeAt(text: String, offset: Int): IntRange? {
     if (text.isBlank() || offset !in text.indices) return null
@@ -2289,32 +2378,49 @@ private fun readerPageAnnotatedString(
 }
 
 @Composable
-private fun SelectionActionBar(
+private fun SelectionTip(
+    textOrigin: Offset,
+    layoutResult: TextLayoutResult?,
+    selectionRange: IntRange?,
     onTranslate: () -> Unit,
     onAddNote: () -> Unit,
-    onClear: () -> Unit,
 ) {
-    Row(
+    val layout = layoutResult ?: return
+    val range = selectionRange ?: return
+    val density = LocalDensity.current
+    val configuration = LocalConfiguration.current
+    val tipWidthPx = with(density) { 168.dp.toPx() }
+    val horizontalMarginPx = with(density) { 12.dp.toPx() }
+    val verticalGapPx = with(density) { 8.dp.toPx() }
+    val endOffset = (range.last + 1).coerceIn(0, layout.layoutInput.text.length)
+    val endRect = layout.getCursorRect(endOffset)
+    val maxX = with(density) { configuration.screenWidthDp.dp.toPx() } - tipWidthPx - horizontalMarginPx
+    val x = (textOrigin.x + endRect.left - tipWidthPx / 2f).coerceIn(horizontalMarginPx, maxX.coerceAtLeast(horizontalMarginPx))
+    val y = textOrigin.y + endRect.bottom + verticalGapPx
+    Surface(
+        tonalElevation = 6.dp,
+        shadowElevation = 8.dp,
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.inverseSurface,
         modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .padding(8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .offset { IntOffset(x.roundToInt(), y.roundToInt()) }
+            .width(168.dp),
     ) {
-        FilledTonalButton(onClick = onTranslate, shape = RoundedCornerShape(8.dp), modifier = Modifier.weight(1f)) {
-            Icon(Icons.Filled.Translate, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(6.dp))
-            Text("翻译")
-        }
-        FilledTonalButton(onClick = onAddNote, shape = RoundedCornerShape(8.dp), modifier = Modifier.weight(1f)) {
-            Icon(Icons.Filled.BookmarkAdd, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(6.dp))
-            Text("摘句")
-        }
-        IconButton(onClick = onClear) {
-            Icon(Icons.Filled.Close, contentDescription = "清除选择")
+        Row(
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(onClick = onTranslate, shape = RoundedCornerShape(8.dp)) {
+                Icon(Icons.Filled.Translate, contentDescription = null, modifier = Modifier.size(17.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("翻译", color = MaterialTheme.colorScheme.inverseOnSurface)
+            }
+            TextButton(onClick = onAddNote, shape = RoundedCornerShape(8.dp)) {
+                Icon(Icons.Filled.BookmarkAdd, contentDescription = null, modifier = Modifier.size(17.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("摘句", color = MaterialTheme.colorScheme.inverseOnSurface)
+            }
         }
     }
 }
@@ -2404,7 +2510,8 @@ private fun WordLookupPanel(
                     )
                     Text(
                         text = buildString {
-                            append(entry.phonetic)
+                            append("美 ").append(entry.usIpa())
+                            append(" · 英 ").append(entry.ukIpa())
                             if (stackDepth > 1) append(" · $stackDepth 层")
                         },
                         style = MaterialTheme.typography.bodyMedium,
@@ -2419,7 +2526,7 @@ private fun WordLookupPanel(
                         FilterChip(
                             selected = ttsAccent == accent,
                             onClick = { onTtsAccentChange(accent) },
-                            enabled = accent in availableTtsAccents,
+                            enabled = true,
                             label = { Text(accent.label) },
                         )
                     }
@@ -2563,7 +2670,7 @@ private fun TranslationResultPanel(
     onAddNote: (() -> Unit)?,
     onClose: () -> Unit,
 ) {
-    val showComparison = sourceText.isNotBlank() && LocalConfiguration.current.screenWidthDp >= 700
+    val showComparison = sourceText.isNotBlank() && LocalConfiguration.current.screenWidthDp >= 600
     val contentColor = if (isError) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurface
     Surface(
         tonalElevation = 6.dp,
@@ -3067,6 +3174,7 @@ private fun NotesScreen(
     onUpdateNote: (ReaderNote, String) -> Unit,
     onDeleteNote: (ReaderNote) -> Unit,
     onDeleteNotes: (List<ReaderNote>) -> Unit,
+    onDeleteLookupHistory: (List<LookupHistoryEntry>) -> Unit,
     onClearHistory: () -> Unit,
 ) {
     var editingNote by remember { mutableStateOf<ReaderNote?>(null) }
@@ -3076,10 +3184,12 @@ private fun NotesScreen(
     var batchDeleteMode by remember { mutableStateOf(false) }
     var displayMode by remember { mutableStateOf(NotesDisplayMode.SUMMARY) }
     var filter by remember { mutableStateOf(NotesFilter.ALL) }
-    val selectedNoteIds = remember { mutableStateMapOf<String, Boolean>() }
+    val selectedItemIds = remember { mutableStateMapOf<String, Boolean>() }
     val expandedCards = remember { mutableStateMapOf<String, Boolean>() }
-    val selectedNotes = notes.filter { selectedNoteIds[it.id] == true }
-    val activeFilter = if (batchDeleteMode) NotesFilter.NOTES else filter
+    val selectedNotes = notes.filter { selectedItemIds["note-${it.id}"] == true }
+    val selectedLookupEntries = lookupHistory.filter { selectedItemIds["history-${it.id}"] == true }
+    val selectedItemCount = selectedNotes.size + selectedLookupEntries.size
+    val activeFilter = filter
     val timelineItems = remember(notes, lookupHistory, activeFilter) {
         buildList {
             if (activeFilter == NotesFilter.ALL || activeFilter == NotesFilter.NOTES) {
@@ -3091,11 +3201,12 @@ private fun NotesScreen(
         }.sortedByDescending { it.updatedAt }
     }
 
-    LaunchedEffect(notes) {
-        selectedNoteIds.keys.toList().forEach { id ->
-            if (notes.none { it.id == id }) selectedNoteIds.remove(id)
+    LaunchedEffect(notes, lookupHistory) {
+        selectedItemIds.keys.toList().forEach { id ->
+            val stillExists = notes.any { id == "note-${it.id}" } || lookupHistory.any { id == "history-${it.id}" }
+            if (!stillExists) selectedItemIds.remove(id)
         }
-        if (notes.isEmpty()) batchDeleteMode = false
+        if (notes.isEmpty() && lookupHistory.isEmpty()) batchDeleteMode = false
     }
 
     Scaffold(
@@ -3104,7 +3215,7 @@ private fun NotesScreen(
             CenterAlignedTopAppBar(
                 title = {
                     Text(
-                        text = if (batchDeleteMode) "已选 ${selectedNotes.size} 条" else "笔记",
+                        text = if (batchDeleteMode) "已选 ${selectedItemCount} 条" else "笔记",
                         fontWeight = FontWeight.Black,
                     )
                 },
@@ -3129,7 +3240,7 @@ private fun NotesScreen(
                                 DropdownMenuItem(
                                     text = { Text("删除所选") },
                                     leadingIcon = { Icon(Icons.Filled.Delete, contentDescription = null) },
-                                    enabled = selectedNotes.isNotEmpty(),
+                                    enabled = selectedItemCount > 0,
                                     onClick = {
                                         menuOpen = false
                                         batchDeleteConfirmOpen = true
@@ -3140,7 +3251,7 @@ private fun NotesScreen(
                                     leadingIcon = { Icon(Icons.Filled.Close, contentDescription = null) },
                                     onClick = {
                                         menuOpen = false
-                                        selectedNoteIds.clear()
+                                        selectedItemIds.clear()
                                         batchDeleteMode = false
                                     },
                                 )
@@ -3156,11 +3267,10 @@ private fun NotesScreen(
                                 DropdownMenuItem(
                                     text = { Text("批量删除") },
                                     leadingIcon = { Icon(Icons.Filled.Delete, contentDescription = null) },
-                                    enabled = notes.isNotEmpty(),
+                                    enabled = notes.isNotEmpty() || lookupHistory.isNotEmpty(),
                                     onClick = {
                                         menuOpen = false
-                                        selectedNoteIds.clear()
-                                        filter = NotesFilter.NOTES
+                                        selectedItemIds.clear()
                                         batchDeleteMode = true
                                     },
                                 )
@@ -3224,15 +3334,15 @@ private fun NotesScreen(
                                     displayMode = displayMode,
                                     expanded = expandedCards[timelineItem.id] == true,
                                     batchDeleteMode = batchDeleteMode,
-                                    selected = selectedNoteIds[note.id] == true,
+                                    selected = selectedItemIds[timelineItem.id] == true,
                                     onToggleExpanded = {
                                         expandedCards[timelineItem.id] = expandedCards[timelineItem.id] != true
                                     },
                                     onSelectedChange = { selected ->
                                         if (selected) {
-                                            selectedNoteIds[note.id] = true
+                                            selectedItemIds[timelineItem.id] = true
                                         } else {
-                                            selectedNoteIds.remove(note.id)
+                                            selectedItemIds.remove(timelineItem.id)
                                         }
                                     },
                                     onEdit = { editingNote = note },
@@ -3245,9 +3355,19 @@ private fun NotesScreen(
                                     item = timelineItem.item,
                                     displayMode = displayMode,
                                     expanded = expandedCards[timelineItem.id] == true,
+                                    batchDeleteMode = batchDeleteMode,
+                                    selected = selectedItemIds[timelineItem.id] == true,
                                     onToggleExpanded = {
                                         expandedCards[timelineItem.id] = expandedCards[timelineItem.id] != true
                                     },
+                                    onSelectedChange = { selected ->
+                                        if (selected) {
+                                            selectedItemIds[timelineItem.id] = true
+                                        } else {
+                                            selectedItemIds.remove(timelineItem.id)
+                                        }
+                                    },
+                                    onDelete = { onDeleteLookupHistory(listOf(timelineItem.item)) },
                                 )
                             }
                         }
@@ -3298,17 +3418,18 @@ private fun NotesScreen(
         AlertDialog(
             onDismissRequest = { batchDeleteConfirmOpen = false },
             icon = { Icon(Icons.Filled.Delete, contentDescription = null) },
-            title = { Text("删除所选笔记？") },
-            text = { Text("将删除 ${selectedNotes.size} 条笔记，不会影响原书内容。") },
+            title = { Text("删除所选记录？") },
+            text = { Text("将删除 ${selectedItemCount} 条记录，不会影响原书内容。") },
             confirmButton = {
                 Button(
                     onClick = {
                         batchDeleteConfirmOpen = false
-                        onDeleteNotes(selectedNotes)
-                        selectedNoteIds.clear()
+                        if (selectedNotes.isNotEmpty()) onDeleteNotes(selectedNotes)
+                        if (selectedLookupEntries.isNotEmpty()) onDeleteLookupHistory(selectedLookupEntries)
+                        selectedItemIds.clear()
                         batchDeleteMode = false
                     },
-                    enabled = selectedNotes.isNotEmpty(),
+                    enabled = selectedItemCount > 0,
                     shape = RoundedCornerShape(8.dp),
                 ) {
                     Text("删除")
@@ -3424,6 +3545,66 @@ private fun EmptyNotes(modifier: Modifier) {
 }
 
 @Composable
+private fun SwipeDeleteContainer(
+    enabled: Boolean = true,
+    onDelete: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    val density = LocalDensity.current
+    val deleteWidth = 88.dp
+    val deleteWidthPx = with(density) { deleteWidth.toPx() }
+    var offsetX by remember { mutableStateOf(0f) }
+    Box(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .matchParentSize()
+                .clip(RoundedCornerShape(8.dp))
+                .background(MaterialTheme.colorScheme.errorContainer),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .width(deleteWidth)
+                    .fillMaxHeight()
+                    .clickable(enabled = enabled) {
+                        offsetX = 0f
+                        onDelete()
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.Delete,
+                    contentDescription = "删除",
+                    tint = MaterialTheme.colorScheme.onErrorContainer,
+                )
+            }
+        }
+        Box(
+            modifier = Modifier
+                .offset { IntOffset(offsetX.roundToInt(), 0) }
+                .pointerInput(enabled) {
+                    if (!enabled) return@pointerInput
+                    detectDragGestures(
+                        onDragEnd = {
+                            offsetX = if (offsetX < -deleteWidthPx * 0.42f) -deleteWidthPx else 0f
+                        },
+                        onDragCancel = {
+                            offsetX = 0f
+                        },
+                        onDrag = { change, dragAmount ->
+                            offsetX = (offsetX + dragAmount.x).coerceIn(-deleteWidthPx, 0f)
+                            if (dragAmount.x != 0f) change.consume()
+                        },
+                    )
+                },
+        ) {
+            content()
+        }
+    }
+}
+
+@Composable
 private fun NoteCard(
     note: ReaderNote,
     noteFont: ReaderFont,
@@ -3438,109 +3619,108 @@ private fun NoteCard(
 ) {
     val showDetails = expanded || displayMode == NotesDisplayMode.DETAIL
     val showEnglishOnly = displayMode == NotesDisplayMode.ENGLISH && !showDetails
-    Card(
-        shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-    ) {
-        Row(
-            modifier = Modifier
-                .clickable {
-                    if (batchDeleteMode) {
-                        onSelectedChange(!selected)
-                    } else if (displayMode != NotesDisplayMode.DETAIL) {
-                        onToggleExpanded()
-                    }
-                }
-                .padding(14.dp),
-            verticalAlignment = Alignment.Top,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+    SwipeDeleteContainer(enabled = !batchDeleteMode, onDelete = onDelete) {
+        Card(
+            shape = RoundedCornerShape(8.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         ) {
-            if (batchDeleteMode) {
-                Checkbox(
-                    checked = selected,
-                    onCheckedChange = onSelectedChange,
-                )
-            }
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Filled.BookmarkAdd,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(18.dp),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = "摘句",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.weight(1f),
-                    )
-                    if (!batchDeleteMode) {
-                        IconButton(onClick = onEdit) {
-                            Icon(Icons.Filled.Edit, contentDescription = "编辑")
-                        }
-                        IconButton(onClick = onDelete) {
-                            Icon(Icons.Filled.Delete, contentDescription = "删除")
+            Row(
+                modifier = Modifier
+                    .clickable {
+                        if (batchDeleteMode) {
+                            onSelectedChange(!selected)
+                        } else if (displayMode != NotesDisplayMode.DETAIL) {
+                            onToggleExpanded()
                         }
                     }
+                    .padding(14.dp),
+                verticalAlignment = Alignment.Top,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (batchDeleteMode) {
+                    Checkbox(
+                        checked = selected,
+                        onCheckedChange = onSelectedChange,
+                    )
                 }
-                Text(
-                    text = "${note.bookTitle} · 第 ${note.paragraphIndex + 1} 段 · ${formatTimestamp(note.updatedAt)}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = if (showDetails) note.sentence else note.sentence.compactText(96),
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = if (showDetails) Int.MAX_VALUE else 3,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (!showEnglishOnly && note.translationText.isNotBlank()) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Filled.BookmarkAdd,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "摘句",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (!batchDeleteMode) {
+                            IconButton(onClick = onEdit) {
+                                Icon(Icons.Filled.Edit, contentDescription = "编辑")
+                            }
+                        }
+                    }
                     Text(
-                        text = if (showDetails) note.translationText else note.translationText.compactText(96),
-                        style = MaterialTheme.typography.bodyMedium,
+                        text = "${note.bookTitle} · 第 ${note.paragraphIndex + 1} 段 · ${formatTimestamp(note.updatedAt)}",
+                        style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = if (showDetails) note.sentence else note.sentence.compactText(96),
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Medium,
                         maxLines = if (showDetails) Int.MAX_VALUE else 3,
                         overflow = TextOverflow.Ellipsis,
                     )
-                }
-                if (showDetails && note.noteText.isNotBlank()) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .padding(10.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
+                    if (!showEnglishOnly && note.translationText.isNotBlank()) {
                         Text(
-                            text = "自己的笔记",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        Text(
-                            text = note.noteText,
-                            style = MaterialTheme.typography.bodyMedium.copy(fontFamily = noteFont.toFontFamily()),
+                            text = if (showDetails) note.translationText else note.translationText.compactText(96),
+                            style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = if (showDetails) Int.MAX_VALUE else 3,
+                            overflow = TextOverflow.Ellipsis,
                         )
                     }
-                }
-                if (!showDetails && !showEnglishOnly && note.noteText.isNotBlank()) {
-                    Text(
-                        text = note.noteText.compactText(56),
-                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = noteFont.toFontFamily()),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    if (showDetails && note.noteText.isNotBlank()) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                text = "自己的笔记",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            Text(
+                                text = note.noteText,
+                                style = MaterialTheme.typography.bodyMedium.copy(fontFamily = noteFont.toFontFamily()),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    if (!showDetails && !showEnglishOnly && note.noteText.isNotBlank()) {
+                        Text(
+                            text = note.noteText.compactText(56),
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = noteFont.toFontFamily()),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
         }
@@ -3552,70 +3732,94 @@ private fun LookupHistoryCard(
     item: LookupHistoryEntry,
     displayMode: NotesDisplayMode,
     expanded: Boolean,
+    batchDeleteMode: Boolean,
+    selected: Boolean,
     onToggleExpanded: () -> Unit,
+    onSelectedChange: (Boolean) -> Unit,
+    onDelete: () -> Unit,
 ) {
     val showDetails = expanded || displayMode == NotesDisplayMode.DETAIL
     val showEnglishOnly = displayMode == NotesDisplayMode.ENGLISH && !showDetails
-    Card(
-        shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-    ) {
-        Column(
-            modifier = Modifier
-                .clickable(enabled = displayMode != NotesDisplayMode.DETAIL) { onToggleExpanded() }
-                .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+    SwipeDeleteContainer(enabled = !batchDeleteMode, onDelete = onDelete) {
+        Card(
+            shape = RoundedCornerShape(8.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = if (item.type == LookupHistoryType.WORD) Icons.Filled.History else Icons.Filled.Translate,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(18.dp),
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = item.type.label,
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.weight(1f),
-                )
-            }
-            Text(
-                text = "${item.bookTitle} · 第 ${item.paragraphIndex + 1} 段 · ${formatTimestamp(item.updatedAt)}",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = if (showDetails) item.sourceText else item.sourceText.compactText(96),
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium,
-                maxLines = if (showDetails) Int.MAX_VALUE else 3,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (showDetails && item.phonetic.isNotBlank()) {
-                Text(
-                    text = item.phonetic,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
-            if (!showEnglishOnly) {
-                val resultText = when {
-                    showDetails -> item.resultText
-                    item.type == LookupHistoryType.WORD -> item.summaryMeaning()
-                    else -> item.resultText.compactText(96)
+            Row(
+                modifier = Modifier
+                    .clickable {
+                        if (batchDeleteMode) {
+                            onSelectedChange(!selected)
+                        } else if (displayMode != NotesDisplayMode.DETAIL) {
+                            onToggleExpanded()
+                        }
+                    }
+                    .padding(14.dp),
+                verticalAlignment = Alignment.Top,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (batchDeleteMode) {
+                    Checkbox(
+                        checked = selected,
+                        onCheckedChange = onSelectedChange,
+                    )
                 }
-                if (resultText.isNotBlank()) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = if (item.type == LookupHistoryType.WORD) Icons.Filled.History else Icons.Filled.Translate,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = item.type.label,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
                     Text(
-                        text = resultText,
-                        style = MaterialTheme.typography.bodyMedium,
+                        text = "${item.bookTitle} · 第 ${item.paragraphIndex + 1} 段 · ${formatTimestamp(item.updatedAt)}",
+                        style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = if (showDetails) item.sourceText else item.sourceText.compactText(96),
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Medium,
                         maxLines = if (showDetails) Int.MAX_VALUE else 3,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    if (showDetails && item.phonetic.isNotBlank()) {
+                        Text(
+                            text = item.phonetic,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    if (!showEnglishOnly) {
+                        val resultText = when {
+                            showDetails -> item.resultText
+                            item.type == LookupHistoryType.WORD -> item.summaryMeaning()
+                            else -> item.resultText.compactText(96)
+                        }
+                        if (resultText.isNotBlank()) {
+                            Text(
+                                text = resultText,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = if (showDetails) Int.MAX_VALUE else 3,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
                 }
             }
         }
