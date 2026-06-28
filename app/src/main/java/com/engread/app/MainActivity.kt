@@ -75,6 +75,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material3.AlertDialog
@@ -125,7 +126,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -145,13 +145,12 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -182,13 +181,13 @@ import com.engread.app.reader.formatTimestamp
 import com.engread.app.ui.EngReadTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.roundToInt
+import kotlin.random.Random
 
 private object ReaderVolumeKeyPager {
     var previous: (() -> Unit)? = null
@@ -199,6 +198,32 @@ private object ReaderVolumeKeyPager {
         if (next === nextHandler) next = null
     }
 }
+
+private val defaultReadingQuestions = listOf(
+    "这一章的核心问题是什么？",
+    "作者在这里想说服我什么？",
+    "这段话和前文有什么联系？",
+    "这里有没有隐藏的转折？",
+    "这一段可以怎么概括？",
+    "哪些词句最值得记住？",
+    "这本书目前的主题线索是什么？",
+    "我应该带着什么问题继续读？",
+    "这个人物的动机是什么？",
+    "这处描写有什么象征意义？",
+    "这一节有哪些关键事实？",
+    "能帮我做三条阅读笔记吗？",
+    "这段英文有什么难句结构？",
+    "哪些表达适合摘抄仿写？",
+    "这个章节和书名有什么关系？",
+    "作者的论证哪里最强？",
+    "作者的论证哪里可能薄弱？",
+    "下一页我该重点留意什么？",
+    "能用简单中文解释这段吗？",
+    "这一章可以怎样复述？",
+)
+
+private fun List<String>.randomThree(): List<String> =
+    shuffled(Random(System.currentTimeMillis())).take(3)
 
 private fun ReaderFont.toFontFamily(): FontFamily =
     when (this) {
@@ -302,6 +327,9 @@ private fun EngReadApp() {
     var bookChats by remember { mutableStateOf(repository.getBookChats()) }
     var settings by remember { mutableStateOf(repository.getSettings()) }
     var sendingChatBookId by remember { mutableStateOf<String?>(null) }
+    var suggestingChatBookId by remember { mutableStateOf<String?>(null) }
+    var preferredChatBookId by rememberSaveable { mutableStateOf("") }
+    var chatSuggestionsByBook by remember { mutableStateOf<Map<String, List<String>>>(emptyMap()) }
     var lastHomeBackAt by remember { mutableStateOf(0L) }
 
     fun refreshAll() {
@@ -371,7 +399,39 @@ private fun EngReadApp() {
         }
     }
 
-    fun sendBookChatMessage(book: Book, text: String) {
+    fun requestChatSuggestions(book: Book) {
+        if (!settings.translation.isConfigured) {
+            chatSuggestionsByBook = chatSuggestionsByBook + (book.id to defaultReadingQuestions.randomThree())
+            return
+        }
+        scope.launch {
+            suggestingChatBookId = book.id
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val chat = repository.getBookChat(book.id)
+                    OpenAiBookChat.suggestQuestions(
+                        book = book,
+                        summary = chat?.summary.orEmpty(),
+                        recentMessages = chat?.messages.orEmpty().takeLast(10),
+                        settings = settings.translation,
+                    )
+                }
+            }
+            suggestingChatBookId = null
+            result.onSuccess { questions ->
+                chatSuggestionsByBook = chatSuggestionsByBook + (book.id to questions.ifEmpty { defaultReadingQuestions.randomThree() })
+            }.onFailure {
+                chatSuggestionsByBook = chatSuggestionsByBook + (book.id to defaultReadingQuestions.randomThree())
+            }
+        }
+    }
+
+    fun sendBookChatMessage(
+        book: Book,
+        text: String,
+        quotedParagraph: String = "",
+        quotedParagraphIndex: Int = book.lastReadParagraph,
+    ) {
         val content = text.trim()
         if (content.isBlank()) return
         if (!settings.translation.isConfigured) {
@@ -380,14 +440,25 @@ private fun EngReadApp() {
         }
         scope.launch {
             sendingChatBookId = book.id
+            suggestingChatBookId = book.id
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     val currentChat = repository.getBookChat(book.id)
                     val existingMessages = currentChat?.messages.orEmpty()
+                    val userContent = if (quotedParagraph.isBlank()) {
+                        content
+                    } else {
+                        buildString {
+                            appendLine("针对这段原文：")
+                            appendLine("> ${quotedParagraph.replace("\n", "\n> ")}")
+                            appendLine()
+                            append("我的问题：").append(content)
+                        }
+                    }
                     val userMessage = ChatMessage(
                         id = UUID.randomUUID().toString(),
                         role = ChatRole.USER,
-                        content = content,
+                        content = userContent,
                         createdAt = System.currentTimeMillis(),
                     )
                     val recentMessages = existingMessages.takeLast(10) + userMessage
@@ -417,10 +488,29 @@ private fun EngReadApp() {
                         summary = nextSummary,
                         messages = existingMessages + newMessages,
                     )
+                    if (quotedParagraph.isNotBlank()) {
+                        repository.addNote(
+                            book = book,
+                            paragraphIndex = quotedParagraphIndex,
+                            sentence = quotedParagraph,
+                            translationText = answer,
+                            noteText = "对话：$content",
+                        )
+                    }
+                    runCatching {
+                        OpenAiBookChat.suggestQuestions(
+                            book = book,
+                            summary = nextSummary,
+                            recentMessages = (existingMessages + newMessages).takeLast(10),
+                            settings = settings.translation,
+                        )
+                    }.getOrElse { emptyList() }
                 }
             }
             sendingChatBookId = null
+            suggestingChatBookId = null
             result.onSuccess {
+                chatSuggestionsByBook = chatSuggestionsByBook + (book.id to it.ifEmpty { defaultReadingQuestions.randomThree() })
                 refreshAll()
             }.onFailure { error ->
                 showMessage(error.message ?: "对话失败")
@@ -504,6 +594,18 @@ private fun EngReadApp() {
                                 }
                             }
                         },
+                        onChatSelection = { paragraphIndex, paragraph, question ->
+                            book?.let { activeBook ->
+                                preferredChatBookId = activeBook.id
+                                screen = AppScreen.Chat
+                                sendBookChatMessage(
+                                    book = activeBook,
+                                    text = question,
+                                    quotedParagraph = paragraph,
+                                    quotedParagraphIndex = paragraphIndex,
+                                )
+                            }
+                        },
                         onAddLookupHistory = { paragraphIndex, type, sourceText, resultText, phonetic ->
                             book?.let { activeBook ->
                                 scope.launch(Dispatchers.IO) {
@@ -581,6 +683,9 @@ private fun EngReadApp() {
                     books = books,
                     bookChats = bookChats,
                     sendingBookId = sendingChatBookId,
+                    suggestingBookId = suggestingChatBookId,
+                    focusBookId = preferredChatBookId,
+                    suggestionsByBook = chatSuggestionsByBook,
                     modifier = Modifier.fillMaxSize(),
                     bottomBar = {
                         HomeBottomBar(
@@ -589,6 +694,8 @@ private fun EngReadApp() {
                         )
                     },
                     onSendMessage = { book, text -> sendBookChatMessage(book, text) },
+                    onRefreshSuggestions = { book -> requestChatSuggestions(book) },
+                    onOpenReader = { book -> screen = AppScreen.Reader(book.id) },
                 )
 
                 AppScreen.Settings -> SettingsScreen(
@@ -889,17 +996,23 @@ private fun ChatScreen(
     books: List<Book>,
     bookChats: List<BookChat>,
     sendingBookId: String?,
+    suggestingBookId: String?,
+    focusBookId: String,
+    suggestionsByBook: Map<String, List<String>>,
     modifier: Modifier = Modifier,
     bottomBar: @Composable () -> Unit,
     onSendMessage: (Book, String) -> Unit,
+    onRefreshSuggestions: (Book) -> Unit,
+    onOpenReader: (Book) -> Unit,
 ) {
     var selectedBookId by rememberSaveable { mutableStateOf("") }
-    val preferredBookId = remember(books, bookChats) {
-        bookChats.firstOrNull { chat -> books.any { it.id == chat.bookId } }?.bookId
+    val preferredBookId = remember(books, bookChats, focusBookId) {
+        focusBookId.takeIf { id -> books.any { it.id == id } }
+            ?: bookChats.firstOrNull { chat -> books.any { it.id == chat.bookId } }?.bookId
             ?: books.firstOrNull()?.id
             ?: ""
     }
-    LaunchedEffect(preferredBookId, books.map { it.id }) {
+    LaunchedEffect(preferredBookId, books.map { it.id }, focusBookId) {
         if (selectedBookId.isBlank() || books.none { it.id == selectedBookId }) {
             selectedBookId = preferredBookId
         }
@@ -911,11 +1024,18 @@ private fun ChatScreen(
     val messages = selectedChat?.messages.orEmpty()
     val listState = rememberLazyListState()
     val isSending = selectedBook != null && sendingBookId == selectedBook.id
+    val suggestionsLoading = selectedBook != null && suggestingBookId == selectedBook.id
+    val remoteSuggestions = selectedBook?.let { suggestionsByBook[it.id] }.orEmpty()
+    var localSuggestions by rememberSaveable(selectedBookId) {
+        mutableStateOf(defaultReadingQuestions.randomThree())
+    }
+    val visibleSuggestions = remoteSuggestions.ifEmpty { localSuggestions }
     var input by rememberSaveable(selectedBookId) { mutableStateOf("") }
 
-    LaunchedEffect(messages.size, isSending) {
-        if (messages.isNotEmpty()) {
-            listState.animateScrollToItem((messages.size - 1).coerceAtLeast(0))
+    LaunchedEffect(messages.size, isSending, suggestionsLoading) {
+        val target = listState.layoutInfo.totalItemsCount - 1
+        if (target >= 0 && (messages.isNotEmpty() || suggestionsLoading)) {
+            listState.animateScrollToItem(target)
         }
     }
 
@@ -969,55 +1089,58 @@ private fun ChatScreen(
                     bookChats = bookChats,
                     onSelect = { selectedBookId = it.id },
                 )
-                if (messages.isEmpty()) {
-                    Box(
+                selectedBook?.let { book ->
+                    Row(
                         modifier = Modifier
-                            .weight(1f)
                             .fillMaxWidth()
-                            .padding(24.dp),
-                        contentAlignment = Alignment.Center,
+                            .padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.End,
                     ) {
-                        Text(
-                            text = "可以问这本书的人物、情节、词句和读书计划。",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center,
+                        AssistChip(
+                            onClick = { onOpenReader(book) },
+                            label = { Text("继续读") },
+                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null) },
                         )
                     }
-                } else {
-                    LazyColumn(
-                        state = listState,
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth(),
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp),
-                    ) {
-                        itemsIndexed(messages, key = { _, message -> message.id }) { _, message ->
-                            ChatMessageBubble(message)
+                }
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    if (messages.isEmpty()) {
+                        item {
+                            EmptyChatPrompt()
                         }
-                        if (isSending) {
-                            item {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.Start,
-                                ) {
-                                    Surface(
-                                        shape = RoundedCornerShape(8.dp),
-                                        color = MaterialTheme.colorScheme.surface,
-                                    ) {
-                                        Row(
-                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        ) {
-                                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                                            Text("思考中", style = MaterialTheme.typography.bodyMedium)
-                                        }
-                                    }
+                    }
+                    itemsIndexed(messages, key = { _, message -> message.id }) { _, message ->
+                        ChatMessageBubble(message)
+                    }
+                    if (isSending) {
+                        item {
+                            ChatThinkingBubble()
+                        }
+                    }
+                    item {
+                        ChatSuggestionsPanel(
+                            questions = visibleSuggestions,
+                            loading = suggestionsLoading,
+                            onQuestionClick = { question ->
+                                val book = selectedBook ?: return@ChatSuggestionsPanel
+                                onSendMessage(book, question)
+                            },
+                            onRefresh = {
+                                val book = selectedBook ?: return@ChatSuggestionsPanel
+                                if (messages.isEmpty()) {
+                                    localSuggestions = defaultReadingQuestions.randomThree()
+                                } else {
+                                    onRefreshSuggestions(book)
                                 }
                             }
-                        }
+                        )
                     }
                 }
             }
@@ -1074,6 +1197,105 @@ private fun BookChatSelector(
 }
 
 @Composable
+private fun EmptyChatPrompt() {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 28.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "可以问这本书的人物、情节、词句和读书计划。",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+@Composable
+private fun ChatThinkingBubble() {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Start,
+    ) {
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = MaterialTheme.colorScheme.surface,
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                Text("思考中", style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChatSuggestionsPanel(
+    questions: List<String>,
+    loading: Boolean,
+    onQuestionClick: (String) -> Unit,
+    onRefresh: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp, bottom = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "猜你想问",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.Bold,
+            )
+            IconButton(onClick = onRefresh, enabled = !loading) {
+                Icon(Icons.Filled.Refresh, contentDescription = "换一批")
+            }
+        }
+        if (loading) {
+            val brush = ShimmerBrush()
+            repeat(3) { index ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(if (index == 2) 0.82f else 1f)
+                        .height(40.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(brush),
+                )
+            }
+        } else {
+            questions.take(3).forEach { question ->
+                Surface(
+                    onClick = { onQuestionClick(question) },
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 1.dp,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        text = question,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun ChatMessageBubble(message: ChatMessage) {
     val fromUser = message.role == ChatRole.USER
     Row(
@@ -1095,15 +1317,161 @@ private fun ChatMessageBubble(message: ChatMessage) {
                     color = if (fromUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                     fontWeight = FontWeight.Bold,
                 )
-                Text(
-                    text = message.content,
-                    style = MaterialTheme.typography.bodyMedium,
+                MarkdownText(
+                    markdown = message.content,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
             }
         }
     }
 }
+
+@Composable
+private fun MarkdownText(
+    markdown: String,
+    color: Color,
+) {
+    val lines = markdown.trim().lines()
+    var inCodeBlock = false
+    val codeLines = mutableListOf<String>()
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        lines.forEach { rawLine ->
+            val line = rawLine.trimEnd()
+            if (line.trim().startsWith("```")) {
+                if (inCodeBlock) {
+                    MarkdownCodeBlock(codeLines.joinToString("\n"))
+                    codeLines.clear()
+                }
+                inCodeBlock = !inCodeBlock
+                return@forEach
+            }
+            if (inCodeBlock) {
+                codeLines += rawLine
+                return@forEach
+            }
+            when {
+                line.isBlank() -> Spacer(Modifier.height(3.dp))
+                line.startsWith("#") -> {
+                    val level = line.takeWhile { it == '#' }.length.coerceIn(1, 3)
+                    val text = line.drop(level).trim()
+                    Text(
+                        text = markdownInline(text),
+                        style = when (level) {
+                            1 -> MaterialTheme.typography.titleMedium
+                            2 -> MaterialTheme.typography.titleSmall
+                            else -> MaterialTheme.typography.bodyLarge
+                        },
+                        color = color,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                line.trimStart().startsWith(">") -> {
+                    Text(
+                        text = markdownInline(line.trimStart().removePrefix(">").trim()),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
+                            .padding(horizontal = 10.dp, vertical = 7.dp),
+                    )
+                }
+                line.trimStart().startsWith("- ") || line.trimStart().startsWith("* ") -> {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("•", color = color, style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            text = markdownInline(line.trimStart().drop(2).trim()),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = color,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+                else -> {
+                    Text(
+                        text = markdownInline(line),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = color,
+                    )
+                }
+            }
+        }
+        if (inCodeBlock && codeLines.isNotEmpty()) {
+            MarkdownCodeBlock(codeLines.joinToString("\n"))
+        }
+    }
+}
+
+@Composable
+private fun MarkdownCodeBlock(code: String) {
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(
+            text = code,
+            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier
+                .horizontalScroll(rememberScrollState())
+                .padding(10.dp),
+        )
+    }
+}
+
+private fun markdownInline(text: String): AnnotatedString =
+    buildAnnotatedString {
+        var index = 0
+        while (index < text.length) {
+            when {
+                text.startsWith("**", index) -> {
+                    val end = text.indexOf("**", startIndex = index + 2)
+                    if (end > index) {
+                        pushStyle(SpanStyle(fontWeight = FontWeight.Bold))
+                        append(text.substring(index + 2, end))
+                        pop()
+                        index = end + 2
+                    } else {
+                        append(text[index])
+                        index += 1
+                    }
+                }
+                text.startsWith("`", index) -> {
+                    val end = text.indexOf("`", startIndex = index + 1)
+                    if (end > index) {
+                        pushStyle(
+                            SpanStyle(
+                                fontFamily = FontFamily.Monospace,
+                                background = Color.Black.copy(alpha = 0.08f),
+                            ),
+                        )
+                        append(text.substring(index + 1, end))
+                        pop()
+                        index = end + 1
+                    } else {
+                        append(text[index])
+                        index += 1
+                    }
+                }
+                text.startsWith("*", index) -> {
+                    val end = text.indexOf("*", startIndex = index + 1)
+                    if (end > index) {
+                        pushStyle(SpanStyle(fontStyle = FontStyle.Italic))
+                        append(text.substring(index + 1, end))
+                        pop()
+                        index = end + 1
+                    } else {
+                        append(text[index])
+                        index += 1
+                    }
+                }
+                else -> {
+                    append(text[index])
+                    index += 1
+                }
+            }
+        }
+    }
 
 @Composable
 private fun ChatInputBar(
@@ -1458,6 +1826,7 @@ private fun ReaderScreen(
     onSettingsChange: (ReaderSettings) -> Unit,
     onProgress: (Int) -> Unit,
     onAddNote: (paragraphIndex: Int, sentence: String, translationText: String, noteText: String) -> Unit,
+    onChatSelection: (paragraphIndex: Int, paragraph: String, question: String) -> Unit,
     onAddLookupHistory: (paragraphIndex: Int, LookupHistoryType, sourceText: String, resultText: String, phonetic: String) -> Unit,
 ) {
     if (book == null) {
@@ -1522,6 +1891,8 @@ private fun ReaderScreen(
     var noteTranslationText by remember(book.id) { mutableStateOf("") }
     var noteTranslationLoading by remember(book.id) { mutableStateOf(false) }
     var noteTranslationIsError by remember(book.id) { mutableStateOf(false) }
+    var chatSelectionText by remember(book.id) { mutableStateOf<String?>(null) }
+    var chatSelectionParagraphIndex by remember(book.id) { mutableStateOf(0) }
     var wordStack by remember(book.id) { mutableStateOf<List<WordEntry>>(emptyList()) }
     var wordLookupSerial by remember(book.id) { mutableStateOf(0) }
     var translationText by remember(book.id) { mutableStateOf<String?>(null) }
@@ -2054,6 +2425,13 @@ private fun ReaderScreen(
                         openNoteDialog(selectedText)
                     }
                 },
+                onChatSelection = {
+                    if (selectedText.isNotBlank()) {
+                        chatSelectionText = selectedText
+                        chatSelectionParagraphIndex = page.paragraphIndexForDisplayOffset(selectionRange?.first ?: 0)
+                        selectionTipVisible = false
+                    }
+                },
                 onClearSelection = {
                     selectionStart = null
                     selectionEnd = null
@@ -2126,6 +2504,20 @@ private fun ReaderScreen(
             },
         )
     }
+
+    chatSelectionText?.let { text ->
+        SelectionChatDialog(
+            paragraph = text,
+            onDismiss = { chatSelectionText = null },
+            onSend = { question ->
+                onChatSelection(chatSelectionParagraphIndex, text, question)
+                chatSelectionText = null
+                selectionStart = null
+                selectionEnd = null
+                selectionTipVisible = false
+            },
+        )
+    }
 }
 
 @Composable
@@ -2150,10 +2542,10 @@ private fun ReaderPageSurface(
     onSelectionTap: () -> Unit,
     onTranslateSelection: () -> Unit,
     onNoteSelection: () -> Unit,
+    onChatSelection: () -> Unit,
     onClearSelection: () -> Unit,
 ) {
     var layoutResult by remember(page.text) { mutableStateOf<TextLayoutResult?>(null) }
-    var textOrigin by remember(page.text) { mutableStateOf(Offset.Zero) }
     var controlsVisible by remember { mutableStateOf(false) }
     var controlsVisibleEpoch by remember { mutableStateOf(0) }
     val titleTapHeight = with(LocalDensity.current) { 52.dp.toPx() }
@@ -2222,56 +2614,57 @@ private fun ReaderPageSurface(
                 )
             }
             Spacer(Modifier.height(18.dp))
-            Text(
-                text = annotatedText,
-                style = MaterialTheme.typography.bodyLarge.copy(
-                    fontFamily = fontFamily,
-                    fontSize = settings.fontSizeSp.sp,
-                    lineHeight = (settings.fontSizeSp * 1.72f).sp,
-                    textAlign = TextAlign.Start,
-                ),
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .onGloballyPositioned { coordinates ->
-                        textOrigin = coordinates.positionInParent()
-                    }
-                    .pointerInput(page.text) {
-                        detectReaderTextGestures(
-                            text = page.text,
-                            getLayoutResult = { layoutResult },
-                            canLookupWord = { selectedText.isBlank() },
-                            currentSelectionRange = { selectionRange },
-                            onWordLongPress = onWordLongPress,
-                            paragraphIndexForOffset = { page.paragraphIndexForDisplayOffset(it) },
-                            onSelectionTap = onSelectionTap,
-                            onSelectionGestureStart = {},
-                            onSelectionChange = onSelectionChange,
-                            onSelectionGestureEnd = {},
-                        )
-                    },
-                onTextLayout = { layoutResult = it },
-            )
+            ) {
+                Text(
+                    text = annotatedText,
+                    style = MaterialTheme.typography.bodyLarge.copy(
+                        fontFamily = fontFamily,
+                        fontSize = settings.fontSizeSp.sp,
+                        lineHeight = (settings.fontSizeSp * 1.72f).sp,
+                        textAlign = TextAlign.Start,
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .pointerInput(page.text) {
+                            detectReaderTextGestures(
+                                text = page.text,
+                                getLayoutResult = { layoutResult },
+                                canLookupWord = { selectedText.isBlank() },
+                                currentSelectionRange = { selectionRange },
+                                onWordLongPress = onWordLongPress,
+                                paragraphIndexForOffset = { page.paragraphIndexForDisplayOffset(it) },
+                                onSelectionTap = onSelectionTap,
+                                onSelectionGestureStart = {},
+                                onSelectionChange = onSelectionChange,
+                                onSelectionGestureEnd = {},
+                            )
+                        },
+                    onTextLayout = { layoutResult = it },
+                )
+
+                SelectionHandles(
+                    text = page.text,
+                    layoutResult = layoutResult,
+                    selectionRange = selectionRange,
+                    onSelectionChange = onSelectionChange,
+                )
+
+                if (selectedText.isNotBlank() && selectionTipVisible) {
+                    SelectionTip(
+                        layoutResult = layoutResult,
+                        selectionRange = selectionRange,
+                        onTranslate = onTranslateSelection,
+                        onAddNote = onNoteSelection,
+                        onChat = onChatSelection,
+                    )
+                }
+            }
 
             Spacer(Modifier.weight(1f))
 
-        }
-
-        SelectionHandles(
-            text = page.text,
-            textOrigin = textOrigin,
-            layoutResult = layoutResult,
-            selectionRange = selectionRange,
-            onSelectionChange = onSelectionChange,
-        )
-
-        if (selectedText.isNotBlank() && selectionTipVisible) {
-            SelectionTip(
-                textOrigin = textOrigin,
-                layoutResult = layoutResult,
-                selectionRange = selectionRange,
-                onTranslate = onTranslateSelection,
-                onAddNote = onNoteSelection,
-            )
         }
 
         if (controlsVisible) {
@@ -2302,7 +2695,6 @@ private fun estimateReaderPageCharBudget(
 @Composable
 private fun SelectionHandles(
     text: String,
-    textOrigin: Offset,
     layoutResult: TextLayoutResult?,
     selectionRange: IntRange?,
     onSelectionChange: (Int, Int) -> Unit,
@@ -2320,7 +2712,7 @@ private fun SelectionHandles(
     val endCursor = Offset(endRect.left, endRect.top)
 
     SelectionHandle(
-        parentPosition = textOrigin + Offset(startRect.left, startRect.top),
+        parentPosition = Offset(startRect.left, startRect.top),
         cursorPositionInText = startCursor,
         cursorHeightPx = (startRect.bottom - startRect.top).coerceAtLeast(1f),
         layoutResult = layout,
@@ -2329,7 +2721,7 @@ private fun SelectionHandles(
         onSelectionChange = onSelectionChange,
     )
     SelectionHandle(
-        parentPosition = textOrigin + Offset(endRect.left, endRect.top),
+        parentPosition = Offset(endRect.left, endRect.top),
         cursorPositionInText = endCursor,
         cursorHeightPx = (endRect.bottom - endRect.top).coerceAtLeast(1f),
         layoutResult = layout,
@@ -2350,7 +2742,9 @@ private fun SelectionHandle(
     onSelectionChange: (Int, Int) -> Unit,
 ) {
     val density = LocalDensity.current
-    val horizontalInset = with(density) { 13.dp.toPx() }
+    val handleWidth = 34.dp
+    val handleWidthPx = with(density) { handleWidth.toPx() }
+    val horizontalInset = handleWidthPx / 2f
     val cursorHeight = with(density) { cursorHeightPx.toDp() }
     val primary = MaterialTheme.colorScheme.primary
     Box(
@@ -2361,19 +2755,26 @@ private fun SelectionHandle(
                     y = parentPosition.y.roundToInt(),
                 )
             }
-            .width(26.dp)
-            .height(cursorHeight + 18.dp)
+            .width(handleWidth)
+            .height(cursorHeight + 16.dp)
             .pointerInput(layoutResult, fixedOffset, isStart, cursorPositionInText, cursorHeightPx) {
                 var dragPosition = cursorPositionInText
                 detectDragGestures(
-                    onDragStart = { dragPosition = cursorPositionInText },
+                    onDragStart = { start ->
+                        dragPosition = Offset(
+                            x = cursorPositionInText.x - horizontalInset + start.x,
+                            y = cursorPositionInText.y + start.y,
+                        )
+                    },
                     onDrag = { change, dragAmount ->
                         dragPosition += dragAmount
-                        val offset = layoutResult.getOffsetForPosition(dragPosition)
+                        val maxOffset = (layoutResult.layoutInput.text.length - 1).coerceAtLeast(0)
+                        val offset = layoutResult.getOffsetForPosition(dragPosition).coerceIn(0, maxOffset)
                         if (isStart) {
-                            onSelectionChange(offset, fixedOffset)
+                            onSelectionChange(offset.coerceIn(0, fixedOffset), fixedOffset)
                         } else {
-                            onSelectionChange(fixedOffset, (offset - 1).coerceAtLeast(fixedOffset + 1))
+                            val minEnd = (fixedOffset + 1).coerceAtMost(maxOffset)
+                            onSelectionChange(fixedOffset, (offset - 1).coerceIn(minEnd, maxOffset))
                         }
                         change.consume()
                     },
@@ -2386,11 +2787,12 @@ private fun SelectionHandle(
                 modifier = Modifier
                     .width(2.dp)
                     .height(cursorHeight)
+                    .clip(RoundedCornerShape(99.dp))
                     .background(primary),
             )
             Box(
                 modifier = Modifier
-                    .size(16.dp)
+                    .size(10.dp)
                     .clip(CircleShape)
                     .background(primary),
             )
@@ -2867,17 +3269,17 @@ private fun readerPageAnnotatedString(
 
 @Composable
 private fun SelectionTip(
-    textOrigin: Offset,
     layoutResult: TextLayoutResult?,
     selectionRange: IntRange?,
     onTranslate: () -> Unit,
     onAddNote: () -> Unit,
+    onChat: () -> Unit,
 ) {
     val layout = layoutResult ?: return
     val range = selectionRange ?: return
     val density = LocalDensity.current
     val configuration = LocalConfiguration.current
-    val tipWidthPx = with(density) { 168.dp.toPx() }
+    val tipWidthPx = with(density) { 246.dp.toPx() }
     val horizontalMarginPx = with(density) { 12.dp.toPx() }
     val verticalGapPx = with(density) { 10.dp.toPx() }
     val tipHeightPx = with(density) { 48.dp.toPx() }
@@ -2888,10 +3290,10 @@ private fun SelectionTip(
     val lineTop = layout.getLineTop(startLine)
     val lineBottom = layout.getLineBottom(startLine)
     val maxX = with(density) { configuration.screenWidthDp.dp.toPx() } - tipWidthPx - horizontalMarginPx
-    val x = (textOrigin.x + (lineLeft + lineRight) / 2f - tipWidthPx / 2f)
+    val x = ((lineLeft + lineRight) / 2f - tipWidthPx / 2f)
         .coerceIn(horizontalMarginPx, maxX.coerceAtLeast(horizontalMarginPx))
-    val preferredY = textOrigin.y + lineTop - tipHeightPx - verticalGapPx
-    val y = if (preferredY >= 0f) preferredY else textOrigin.y + lineBottom + verticalGapPx
+    val preferredY = lineTop - tipHeightPx - verticalGapPx
+    val y = if (preferredY >= 0f) preferredY else lineBottom + verticalGapPx
     Surface(
         tonalElevation = 6.dp,
         shadowElevation = 8.dp,
@@ -2899,7 +3301,7 @@ private fun SelectionTip(
         color = MaterialTheme.colorScheme.inverseSurface,
         modifier = Modifier
             .offset { IntOffset(x.roundToInt(), y.roundToInt()) }
-            .width(168.dp),
+            .width(246.dp),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
@@ -2915,6 +3317,11 @@ private fun SelectionTip(
                 Icon(Icons.Filled.BookmarkAdd, contentDescription = null, modifier = Modifier.size(17.dp))
                 Spacer(Modifier.width(4.dp))
                 Text("摘句", color = MaterialTheme.colorScheme.inverseOnSurface)
+            }
+            TextButton(onClick = onChat, shape = RoundedCornerShape(8.dp)) {
+                Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null, modifier = Modifier.size(17.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("对话", color = MaterialTheme.colorScheme.inverseOnSurface)
             }
         }
     }
@@ -3699,6 +4106,69 @@ private fun SentenceNoteDialog(
                 shape = RoundedCornerShape(8.dp),
             ) {
                 Text("保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        },
+    )
+}
+
+@Composable
+private fun SelectionChatDialog(
+    paragraph: String,
+    onDismiss: () -> Unit,
+    onSend: (String) -> Unit,
+) {
+    val excerpt = remember(paragraph) { paragraph.trim() }
+    var question by remember(paragraph) { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null) },
+        title = { Text("和这段文字对话") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        text = excerpt.ifBlank { "没有识别到选中文本。" },
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier
+                            .heightIn(max = 180.dp)
+                            .verticalScroll(rememberScrollState())
+                            .padding(10.dp),
+                    )
+                }
+                TextField(
+                    value = question,
+                    onValueChange = { question = it },
+                    label = { Text("想问什么") },
+                    placeholder = { Text("例如：这段话的重点是什么？") },
+                    minLines = 2,
+                    maxLines = 5,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = MaterialTheme.colorScheme.surface,
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                    ),
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onSend(question) },
+                enabled = excerpt.isNotBlank() && question.trim().isNotBlank(),
+                shape = RoundedCornerShape(8.dp),
+            ) {
+                Text("发送")
             }
         },
         dismissButton = {

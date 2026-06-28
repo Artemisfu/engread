@@ -423,34 +423,43 @@ object OpenAiBookChat {
             }
             val currentUserMessage = recentMessages.lastOrNull { it.role == ChatRole.USER }?.content.orEmpty()
             val latestFragments = recentMessages.dropLast(1).takeLast(10).toPromptTranscript().ifBlank { "暂无。" }
-            settings.createChatCompletion(
+            val userPrompt = buildBookChatPrompt(book, summary, latestFragments, currentUserMessage)
+            runCatching {
+                settings.createBookToolLoopCompletion(book, userPrompt)
+            }.getOrElse {
+                settings.createChatCompletion(
+                    messages = bookChatMessages(userPrompt),
+                    temperature = 0.35,
+                )
+            }
+        }
+
+    suspend fun suggestQuestions(
+        book: Book,
+        summary: String,
+        recentMessages: List<ChatMessage>,
+        settings: TranslationSettings,
+    ): List<String> =
+        withContext(Dispatchers.IO) {
+            if (!settings.isConfigured) {
+                error("请先在设置里填写 Base URL、API Key 和模型。")
+            }
+            val currentUserMessage = recentMessages.lastOrNull { it.role == ChatRole.USER }?.content.orEmpty()
+            val latestFragments = recentMessages.takeLast(10).toPromptTranscript().ifBlank { "暂无。" }
+            val prompt = buildBookChatPrompt(book, summary, latestFragments, currentUserMessage) +
+                "\n\n请根据上面的最新阅读讨论，生成 3 个用户下一步可能想问的问题。" +
+                "要求：只返回 JSON 字符串数组；每个问题 8 到 24 个汉字；问题要具体，能继续推进阅读理解。"
+            val content = settings.createChatCompletion(
                 messages = JSONArray()
                     .put(
                         JSONObject()
                             .put("role", "system")
-                            .put(
-                                "content",
-                                "You are EngRead's warm reading companion for Chinese readers of English books. " +
-                                    "Answer in Simplified Chinese with a gentle, practical tone. Use the compressed memory and recent turns. " +
-                                    "When useful, connect your answer to the current book. If you are unsure, say so briefly.",
-                            ),
+                            .put("content", "You generate concise follow-up reading questions. Return JSON array only."),
                     )
-                    .put(
-                        JSONObject()
-                            .put("role", "user")
-                            .put(
-                                "content",
-                                buildString {
-                                    appendLine("目前针对数据${book.toDiscussionDataPrompt()}进行讨论，")
-                                    appendLine("历史对话摘要：${summary.ifBlank { "暂无。" }}")
-                                    appendLine("最近话题：${summary.currentTopicForPrompt()}")
-                                    appendLine("最新对话片段：$latestFragments")
-                                    appendLine("当前用户说：$currentUserMessage")
-                                },
-                            ),
-                    ),
-                temperature = 0.35,
+                    .put(JSONObject().put("role", "user").put("content", prompt)),
+                temperature = 0.55,
             )
+            content.toQuestionList().take(3)
         }
 
     suspend fun summarize(
@@ -497,6 +506,237 @@ object OpenAiBookChat {
         }
 }
 
+private fun buildBookChatPrompt(
+    book: Book,
+    summary: String,
+    latestFragments: String,
+    currentUserMessage: String,
+): String =
+    buildString {
+        appendLine("目前针对数据${book.toDiscussionDataPrompt()}进行讨论，")
+        appendLine("历史对话摘要：${summary.ifBlank { "暂无。" }}")
+        appendLine("最近话题：${summary.currentTopicForPrompt()}")
+        appendLine("最新对话片段：$latestFragments")
+        appendLine("当前用户说：$currentUserMessage")
+    }
+
+private fun bookChatMessages(userPrompt: String): JSONArray =
+    JSONArray()
+        .put(
+            JSONObject()
+                .put("role", "system")
+                .put(
+                    "content",
+                    "You are EngRead's warm reading companion for Chinese readers of English books. " +
+                        "Answer in Simplified Chinese with a gentle, practical tone. Use the compressed memory and recent turns. " +
+                        "Use Markdown where it improves readability. When useful, call the book search tools before answering. " +
+                        "If you are unsure, say so briefly.",
+                ),
+        )
+        .put(JSONObject().put("role", "user").put("content", userPrompt))
+
+private fun TranslationSettings.createBookToolLoopCompletion(book: Book, userPrompt: String): String {
+    val messages = bookChatMessages(userPrompt)
+    val tools = book.bookChatToolDefinitions()
+    var lastContent = ""
+    repeat(4) {
+        val message = createChatCompletionMessage(
+            messages = messages,
+            temperature = 0.35,
+            tools = tools,
+        )
+        lastContent = message.optString("content").trim()
+        val toolCalls = message.optJSONArray("tool_calls")
+        if (toolCalls == null || toolCalls.length() == 0) {
+            return lastContent.takeIf { it.isNotBlank() } ?: error("服务没有返回可用内容。")
+        }
+        messages.put(message)
+        for (index in 0 until toolCalls.length()) {
+            val call = toolCalls.optJSONObject(index) ?: continue
+            val function = call.optJSONObject("function") ?: continue
+            val name = function.optString("name")
+            val args = function.optString("arguments").toJsonObjectOrEmpty()
+            val result = runCatching { book.executeBookTool(name, args) }
+                .getOrElse { error -> JSONObject().put("error", error.message ?: "tool failed") }
+            messages.put(
+                JSONObject()
+                    .put("role", "tool")
+                    .put("tool_call_id", call.optString("id"))
+                    .put("content", result.toString()),
+            )
+        }
+    }
+    return lastContent.takeIf { it.isNotBlank() } ?: error("工具调用没有产生最终回复。")
+}
+
+private fun Book.bookChatToolDefinitions(): JSONArray =
+    JSONArray()
+        .put(
+            JSONObject()
+                .put("type", "function")
+                .put(
+                    "function",
+                    JSONObject()
+                        .put("name", "search_book")
+                        .put("description", "Search this book by keyword and return paragraph positions with short snippets.")
+                        .put(
+                            "parameters",
+                            JSONObject()
+                                .put("type", "object")
+                                .put(
+                                    "properties",
+                                    JSONObject()
+                                        .put("query", JSONObject().put("type", "string").put("description", "Keyword or phrase to search."))
+                                        .put(
+                                            "max_results",
+                                            JSONObject()
+                                                .put("type", "integer")
+                                                .put("description", "Maximum result count, 1-10.")
+                                                .put("minimum", 1)
+                                                .put("maximum", 10),
+                                        ),
+                                )
+                                .put("required", JSONArray().put("query")),
+                        ),
+                ),
+        )
+        .put(
+            JSONObject()
+                .put("type", "function")
+                .put(
+                    "function",
+                    JSONObject()
+                        .put("name", "get_text_block")
+                        .put("description", "Fetch a text block around a paragraph position in this book.")
+                        .put(
+                            "parameters",
+                            JSONObject()
+                                .put("type", "object")
+                                .put(
+                                    "properties",
+                                    JSONObject()
+                                        .put(
+                                            "paragraph_index",
+                                            JSONObject()
+                                                .put("type", "integer")
+                                                .put("description", "Zero-based paragraph index returned by search_book."),
+                                        )
+                                        .put("before", JSONObject().put("type", "integer").put("minimum", 0).put("maximum", 4))
+                                        .put("after", JSONObject().put("type", "integer").put("minimum", 0).put("maximum", 6)),
+                                )
+                                .put("required", JSONArray().put("paragraph_index")),
+                        ),
+                ),
+        )
+        .put(
+            JSONObject()
+                .put("type", "function")
+                .put(
+                    "function",
+                    JSONObject()
+                        .put("name", "get_table_of_contents")
+                        .put("description", "Return this book's table of contents entries with paragraph positions.")
+                        .put(
+                            "parameters",
+                            JSONObject()
+                                .put("type", "object")
+                                .put("properties", JSONObject()),
+                        ),
+                ),
+        )
+
+private fun Book.executeBookTool(name: String, args: JSONObject): JSONObject =
+    when (name) {
+        "search_book" -> searchBookTool(args.optString("query"), args.optInt("max_results", 6))
+        "get_text_block" -> getTextBlockTool(args.optInt("paragraph_index"), args.optInt("before", 1), args.optInt("after", 2))
+        "get_table_of_contents" -> JSONObject()
+            .put("title", title)
+            .put(
+                "toc",
+                JSONArray().also { array ->
+                    toc.take(80).forEach { entry ->
+                        array.put(
+                            JSONObject()
+                                .put("title", entry.title)
+                                .put("paragraph_index", entry.paragraphIndex),
+                        )
+                    }
+                },
+            )
+        else -> JSONObject().put("error", "Unknown tool: $name")
+    }
+
+private fun Book.searchBookTool(query: String, maxResults: Int): JSONObject {
+    val normalizedQuery = query.replace(Regex("\\s+"), " ").trim()
+    val queryLower = normalizedQuery.lowercase(Locale.ROOT)
+    val tokens = queryLower.split(Regex("\\s+")).filter { it.length >= 2 }.distinct()
+    if (queryLower.isBlank()) return JSONObject().put("results", JSONArray())
+    val results = paragraphs
+        .mapIndexedNotNull { index, paragraph ->
+            val lower = paragraph.lowercase(Locale.ROOT)
+            val exactIndex = lower.indexOf(queryLower)
+            val tokenHits = tokens.count { it in lower }
+            val score = when {
+                exactIndex >= 0 -> 100 + tokenHits
+                tokenHits > 0 -> tokenHits
+                else -> 0
+            }
+            if (score <= 0) null else Triple(index, score, exactIndex.coerceAtLeast(0))
+        }
+        .sortedWith(compareByDescending<Triple<Int, Int, Int>> { it.second }.thenBy { it.first })
+        .take(maxResults.coerceIn(1, 10))
+    return JSONObject()
+        .put("query", normalizedQuery)
+        .put(
+            "results",
+            JSONArray().also { array ->
+                results.forEach { (index, _, matchIndex) ->
+                    array.put(
+                        JSONObject()
+                            .put("paragraph_index", index)
+                            .put("chapter", chapterTitleForParagraph(index))
+                            .put("snippet", paragraphs[index].snippetAround(matchIndex, 260)),
+                    )
+                }
+            },
+        )
+}
+
+private fun Book.getTextBlockTool(paragraphIndex: Int, before: Int, after: Int): JSONObject {
+    val center = paragraphIndex.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
+    val start = (center - before.coerceIn(0, 4)).coerceAtLeast(0)
+    val end = (center + after.coerceIn(0, 6)).coerceAtMost((paragraphs.size - 1).coerceAtLeast(0))
+    return JSONObject()
+        .put("paragraph_index", center)
+        .put("chapter", chapterTitleForParagraph(center))
+        .put(
+            "blocks",
+            JSONArray().also { array ->
+                for (index in start..end) {
+                    array.put(
+                        JSONObject()
+                            .put("paragraph_index", index)
+                            .put("text", paragraphs.getOrNull(index).orEmpty()),
+                    )
+                }
+            },
+        )
+}
+
+private fun Book.chapterTitleForParagraph(paragraphIndex: Int): String =
+    toc.lastOrNull { it.paragraphIndex <= paragraphIndex }?.title ?: title
+
+private fun String.snippetAround(matchIndex: Int, maxLength: Int): String {
+    val normalized = replace(Regex("\\s+"), " ").trim()
+    if (normalized.length <= maxLength) return normalized
+    val start = (matchIndex - maxLength / 3).coerceIn(0, (normalized.length - maxLength).coerceAtLeast(0))
+    return buildString {
+        if (start > 0) append("...")
+        append(normalized.substring(start, (start + maxLength).coerceAtMost(normalized.length)).trim())
+        if (start + maxLength < normalized.length) append("...")
+    }
+}
+
 private fun List<ChatMessage>.toPromptTranscript(): String =
     joinToString("\n") { message ->
         val role = when (message.role) {
@@ -535,6 +775,16 @@ private fun String.compactPromptText(maxLength: Int): String {
     return if (normalized.length <= maxLength) normalized else normalized.take(maxLength).trimEnd() + "..."
 }
 
+private fun String.toQuestionList(): List<String> {
+    val arrayText = extractJsonArrayText()
+    val array = JSONArray(arrayText)
+    return buildList {
+        for (index in 0 until array.length()) {
+            array.optString(index).trim().takeIf { it.isNotBlank() }?.let { add(it) }
+        }
+    }
+}
+
 private fun JSONObject.optStringList(name: String): List<String> {
     val array = optJSONArray(name) ?: return emptyList()
     return buildList {
@@ -544,12 +794,27 @@ private fun JSONObject.optStringList(name: String): List<String> {
     }
 }
 
-private fun TranslationSettings.createChatCompletion(messages: JSONArray, temperature: Double): String {
+private fun TranslationSettings.createChatCompletion(messages: JSONArray, temperature: Double): String =
+    createChatCompletionMessage(messages = messages, temperature = temperature)
+        .optString("content")
+        .trim()
+        .takeIf { it.isNotBlank() }
+        ?: error("服务没有返回可用内容。")
+
+private fun TranslationSettings.createChatCompletionMessage(
+    messages: JSONArray,
+    temperature: Double,
+    tools: JSONArray? = null,
+): JSONObject {
     val endpoint = baseUrl.toChatCompletionsEndpoint()
     val body = JSONObject()
         .put("model", model.trim())
         .put("messages", messages)
         .put("temperature", temperature)
+    if (tools != null && tools.length() > 0) {
+        body.put("tools", tools)
+        body.put("tool_choice", "auto")
+    }
 
     val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
         requestMethod = "POST"
@@ -580,9 +845,10 @@ private fun TranslationSettings.createChatCompletion(messages: JSONArray, temper
             .optJSONArray("choices")
             ?.optJSONObject(0)
             ?.optJSONObject("message")
-            ?.optString("content")
-            ?.trim()
-            ?.takeIf { it.isNotBlank() }
+            ?.takeIf { message ->
+                message.optString("content").isNotBlank() ||
+                    (message.optJSONArray("tool_calls")?.length() ?: 0) > 0
+            }
             ?: error("服务没有返回可用内容。")
     } finally {
         connection.disconnect()
@@ -610,6 +876,26 @@ private fun String.extractJsonObjectText(): String {
     if (start < 0 || end <= start) error("查词服务没有返回 JSON。")
     return trimmed.substring(start, end + 1)
 }
+
+private fun String.extractJsonArrayText(): String {
+    val trimmed = trim()
+        .removePrefix("```json")
+        .removePrefix("```")
+        .removeSuffix("```")
+        .trim()
+    val start = trimmed.indexOf('[')
+    val end = trimmed.lastIndexOf(']')
+    if (start >= 0 && end > start) return trimmed.substring(start, end + 1)
+    val fallback = lineSequence()
+        .map { it.trim().trimStart('-', '*', ' ', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '.', '、') }
+        .filter { it.isNotBlank() }
+        .take(3)
+        .toList()
+    return JSONArray(fallback).toString()
+}
+
+private fun String.toJsonObjectOrEmpty(): JSONObject =
+    runCatching { JSONObject(ifBlank { "{}" }) }.getOrElse { JSONObject() }
 
 private fun String.toApiErrorMessage(responseCode: Int): String {
     val apiMessage = runCatching {
