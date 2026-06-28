@@ -252,6 +252,19 @@ private val defaultReadingQuestions = listOf(
     "这一章可以怎样复述？",
 )
 
+private val selectionChatQuestionPrompts = listOf(
+    "这段话的核心意思是什么？",
+    "这段英文有什么难句结构？",
+    "这段话可以怎么翻译得更自然？",
+    "这段话里哪些词值得记住？",
+    "这段话和前文有什么联系？",
+    "这段话表达了什么情绪或立场？",
+    "请用简单英文改写这段话。",
+    "这段话有什么文化或背景信息？",
+    "这段话适合做什么摘句笔记？",
+    "我应该怎样理解这句话的隐含意思？",
+)
+
 private fun List<String>.randomThree(): List<String> =
     shuffled(Random(System.currentTimeMillis())).take(3)
 
@@ -2857,6 +2870,7 @@ private fun ReaderScreen(
                         translationSourceText = ""
                         translationLoading = false
                         translationIsError = false
+                        if (selectedText.isNotBlank()) selectionTipVisible = true
                     },
                 )
             }
@@ -2926,6 +2940,17 @@ private fun ReaderScreen(
                         }
                     }
                 },
+                onHighlightSelection = {
+                    if (selectedText.isNotBlank()) {
+                        onAddNote(
+                            page.paragraphIndexForDisplayOffset(selectionRange?.first ?: 0),
+                            selectedText,
+                            "",
+                            "",
+                        )
+                        selectionTipVisible = true
+                    }
+                },
                 onNoteSelection = {
                     if (selectedText.isNotBlank()) {
                         selectionTipVisible = false
@@ -2992,6 +3017,7 @@ private fun ReaderScreen(
                 noteTranslationText = ""
                 noteTranslationLoading = false
                 noteTranslationIsError = false
+                if (selectedText.isNotBlank()) selectionTipVisible = true
             },
             onSave = { sentences, translationText, noteText ->
                 sentences.forEach { sentence ->
@@ -3006,8 +3032,7 @@ private fun ReaderScreen(
                 noteTranslationText = ""
                 noteTranslationLoading = false
                 noteTranslationIsError = false
-                selectionStart = null
-                selectionEnd = null
+                if (selectedText.isNotBlank()) selectionTipVisible = true
             },
         )
     }
@@ -3015,13 +3040,14 @@ private fun ReaderScreen(
     chatSelectionText?.let { text ->
         SelectionChatDialog(
             paragraph = text,
-            onDismiss = { chatSelectionText = null },
+            onDismiss = {
+                chatSelectionText = null
+                if (selectedText.isNotBlank()) selectionTipVisible = true
+            },
             onSend = { question ->
                 onChatSelection(chatSelectionParagraphIndex, text, question)
                 chatSelectionText = null
-                selectionStart = null
-                selectionEnd = null
-                selectionTipVisible = false
+                if (selectedText.isNotBlank()) selectionTipVisible = true
             },
         )
     }
@@ -3048,6 +3074,7 @@ private fun ReaderPageSurface(
     onSelectionChange: (Int, Int) -> Unit,
     onSelectionTap: () -> Unit,
     onTranslateSelection: () -> Unit,
+    onHighlightSelection: () -> Unit,
     onNoteSelection: () -> Unit,
     onChatSelection: () -> Unit,
     onClearSelection: () -> Unit,
@@ -3164,6 +3191,7 @@ private fun ReaderPageSurface(
                         layoutResult = layoutResult,
                         selectionRange = selectionRange,
                         onTranslate = onTranslateSelection,
+                        onHighlight = onHighlightSelection,
                         onAddNote = onNoteSelection,
                         onChat = onChatSelection,
                     )
@@ -3786,6 +3814,7 @@ private fun SelectionTip(
     layoutResult: TextLayoutResult?,
     selectionRange: IntRange?,
     onTranslate: () -> Unit,
+    onHighlight: () -> Unit,
     onAddNote: () -> Unit,
     onChat: () -> Unit,
 ) {
@@ -3793,7 +3822,7 @@ private fun SelectionTip(
     val range = selectionRange ?: return
     val density = LocalDensity.current
     val configuration = LocalConfiguration.current
-    val tipWidth = 282.dp
+    val tipWidth = 276.dp
     val tipWidthPx = with(density) { tipWidth.toPx() }
     val horizontalMarginPx = with(density) { 12.dp.toPx() }
     val verticalGapPx = with(density) { 10.dp.toPx() }
@@ -3819,38 +3848,55 @@ private fun SelectionTip(
             .width(tipWidth),
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(0.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton(
+            SelectionTipButton(
+                text = "翻译",
+                icon = { Icon(Icons.Filled.Translate, contentDescription = null, modifier = Modifier.size(16.dp)) },
                 onClick = onTranslate,
-                shape = RoundedCornerShape(8.dp),
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-            ) {
-                Icon(Icons.Filled.Translate, contentDescription = null, modifier = Modifier.size(17.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("翻译", color = MaterialTheme.colorScheme.inverseOnSurface, maxLines = 1, softWrap = false)
-            }
-            TextButton(
+            )
+            SelectionTipButton(
+                text = "划线",
+                icon = { Icon(Icons.Filled.Edit, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                onClick = onHighlight,
+            )
+            SelectionTipButton(
+                text = "摘句",
+                icon = { Icon(Icons.Filled.BookmarkAdd, contentDescription = null, modifier = Modifier.size(16.dp)) },
                 onClick = onAddNote,
-                shape = RoundedCornerShape(8.dp),
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-            ) {
-                Icon(Icons.Filled.BookmarkAdd, contentDescription = null, modifier = Modifier.size(17.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("摘句", color = MaterialTheme.colorScheme.inverseOnSurface, maxLines = 1, softWrap = false)
-            }
-            TextButton(
+            )
+            SelectionTipButton(
+                text = "对话",
+                icon = { Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null, modifier = Modifier.size(16.dp)) },
                 onClick = onChat,
-                shape = RoundedCornerShape(8.dp),
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-            ) {
-                Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null, modifier = Modifier.size(17.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("对话", color = MaterialTheme.colorScheme.inverseOnSurface, maxLines = 1, softWrap = false)
-            }
+            )
         }
+    }
+}
+
+@Composable
+private fun SelectionTipButton(
+    text: String,
+    icon: @Composable () -> Unit,
+    onClick: () -> Unit,
+) {
+    TextButton(
+        onClick = onClick,
+        shape = RoundedCornerShape(8.dp),
+        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
+        modifier = Modifier.width(67.dp),
+    ) {
+        icon()
+        Spacer(Modifier.width(3.dp))
+        Text(
+            text = text,
+            color = MaterialTheme.colorScheme.inverseOnSurface,
+            style = MaterialTheme.typography.labelMedium,
+            maxLines = 1,
+            softWrap = false,
+        )
     }
 }
 
@@ -4651,6 +4697,9 @@ private fun SelectionChatDialog(
 ) {
     val excerpt = remember(paragraph) { paragraph.trim() }
     var question by remember(paragraph) { mutableStateOf("") }
+    var suggestions by remember(paragraph) {
+        mutableStateOf(selectionChatQuestionPrompts.randomThree())
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null) },
@@ -4670,6 +4719,36 @@ private fun SelectionChatDialog(
                             .verticalScroll(rememberScrollState())
                             .padding(10.dp),
                     )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "猜你想问",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    IconButton(onClick = { suggestions = selectionChatQuestionPrompts.randomThree() }) {
+                        Icon(Icons.Filled.Refresh, contentDescription = "换一批")
+                    }
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    suggestions.forEach { prompt ->
+                        AssistChip(
+                            onClick = { question = prompt },
+                            label = {
+                                Text(
+                                    text = prompt,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
                 }
                 TextField(
                     value = question,
