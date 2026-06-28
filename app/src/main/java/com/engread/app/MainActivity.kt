@@ -171,6 +171,7 @@ import com.engread.app.data.LookupHistoryEntry
 import com.engread.app.data.LookupHistoryType
 import com.engread.app.data.ReaderFont
 import com.engread.app.data.ReaderNote
+import com.engread.app.data.ReaderNoteType
 import com.engread.app.data.ReaderSettings
 import com.engread.app.data.ReaderTheme
 import com.engread.app.reader.BookChapter
@@ -575,7 +576,8 @@ private fun EngReadApp() {
                             paragraphIndex = quotedParagraphIndex,
                             sentence = quotedParagraph,
                             translationText = answer,
-                            noteText = "对话：$content",
+                            noteText = content,
+                            noteType = ReaderNoteType.CHAT,
                         )
                     }
                     Unit
@@ -5464,6 +5466,7 @@ private fun NoteCard(
 ) {
     val showDetails = expanded || displayMode == NotesDisplayMode.DETAIL
     val showEnglishOnly = displayMode == NotesDisplayMode.ENGLISH && !showDetails
+    val isChatNote = note.noteType == ReaderNoteType.CHAT
     SwipeDeleteContainer(enabled = !batchDeleteMode, onDelete = onDelete) {
         Card(
             shape = RoundedCornerShape(8.dp),
@@ -5494,14 +5497,14 @@ private fun NoteCard(
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
-                            imageVector = Icons.Filled.BookmarkAdd,
+                            imageVector = if (isChatNote) Icons.AutoMirrored.Filled.Chat else Icons.Filled.BookmarkAdd,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(18.dp),
                         )
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            text = "摘句",
+                            text = note.noteType.label,
                             style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.weight(1f),
@@ -5519,56 +5522,131 @@ private fun NoteCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    Text(
-                        text = if (showDetails) note.sentence else note.sentence.compactText(96),
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = if (showDetails) Int.MAX_VALUE else 3,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (!showEnglishOnly && note.translationText.isNotBlank()) {
+                    if (isChatNote) {
+                        NotePlainSection(
+                            title = "原文",
+                            text = if (showDetails) note.sentence else note.sentence.compactText(96),
+                            emphasized = true,
+                            maxLines = if (showDetails) Int.MAX_VALUE else 3,
+                        )
+                        if (!showEnglishOnly && note.noteText.isNotBlank()) {
+                            if (showDetails) {
+                                NoteMarkdownSection(title = "提问", markdown = note.noteText)
+                            } else {
+                                NotePlainSection(
+                                    title = "提问",
+                                    text = note.noteText.compactText(88),
+                                    maxLines = 2,
+                                )
+                            }
+                        }
+                        if (!showEnglishOnly && note.translationText.isNotBlank()) {
+                            if (showDetails) {
+                                NoteMarkdownSection(title = "回答", markdown = note.translationText)
+                            } else {
+                                NotePlainSection(
+                                    title = "回答",
+                                    text = note.translationText.compactText(120),
+                                    maxLines = 3,
+                                )
+                            }
+                        }
+                    } else {
                         Text(
-                            text = if (showDetails) note.translationText else note.translationText.compactText(96),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            text = if (showDetails) note.sentence else note.sentence.compactText(96),
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.Medium,
                             maxLines = if (showDetails) Int.MAX_VALUE else 3,
                             overflow = TextOverflow.Ellipsis,
                         )
-                    }
-                    if (showDetails && note.noteText.isNotBlank()) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(MaterialTheme.colorScheme.surfaceVariant)
-                                .padding(10.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
+                        if (!showEnglishOnly && note.translationText.isNotBlank()) {
                             Text(
-                                text = "自己的笔记",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary,
-                                fontWeight = FontWeight.Bold,
-                            )
-                            Text(
-                                text = note.noteText,
-                                style = MaterialTheme.typography.bodyMedium.copy(fontFamily = noteFont.toFontFamily()),
+                                text = if (showDetails) note.translationText else note.translationText.compactText(96),
+                                style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = if (showDetails) Int.MAX_VALUE else 3,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
-                    }
-                    if (!showDetails && !showEnglishOnly && note.noteText.isNotBlank()) {
-                        Text(
-                            text = note.noteText.compactText(56),
-                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = noteFont.toFontFamily()),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                        if (showDetails && note.noteText.isNotBlank()) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                                    .padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Text(
+                                    text = "自己的笔记",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                                Text(
+                                    text = note.noteText,
+                                    style = MaterialTheme.typography.bodyMedium.copy(fontFamily = noteFont.toFontFamily()),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        if (!showDetails && !showEnglishOnly && note.noteText.isNotBlank()) {
+                            Text(
+                                text = note.noteText.compactText(56),
+                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = noteFont.toFontFamily()),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun NotePlainSection(
+    title: String,
+    text: String,
+    emphasized: Boolean = false,
+    maxLines: Int = Int.MAX_VALUE,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Bold,
+        )
+        Text(
+            text = text,
+            style = if (emphasized) MaterialTheme.typography.bodyLarge else MaterialTheme.typography.bodyMedium,
+            color = if (emphasized) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+            fontWeight = if (emphasized) FontWeight.Medium else null,
+            maxLines = maxLines,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun NoteMarkdownSection(
+    title: String,
+    markdown: String,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Bold,
+        )
+        MarkdownText(
+            markdown = markdown,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

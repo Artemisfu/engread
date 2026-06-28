@@ -76,9 +76,15 @@ data class ReaderNote(
     val sentence: String,
     val translationText: String = "",
     val noteText: String,
+    val noteType: ReaderNoteType = ReaderNoteType.EXCERPT,
     val createdAt: Long,
     val updatedAt: Long,
 )
+
+enum class ReaderNoteType(val label: String) {
+    EXCERPT("摘句"),
+    CHAT("对话"),
+}
 
 data class LookupHistoryEntry(
     val id: String,

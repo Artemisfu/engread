@@ -144,6 +144,7 @@ class LibraryRepository(
         sentence: String,
         translationText: String,
         noteText: String,
+        noteType: ReaderNoteType = ReaderNoteType.EXCERPT,
     ): ReaderNote {
         val now = System.currentTimeMillis()
         val note = ReaderNote(
@@ -154,6 +155,7 @@ class LibraryRepository(
             sentence = sentence.trim(),
             translationText = translationText.trim(),
             noteText = noteText.trim(),
+            noteType = noteType,
             createdAt = now,
             updatedAt = now,
         )
@@ -296,12 +298,25 @@ class LibraryRepository(
                 appendLine("## $bookTitle")
                 appendLine()
                 bookNotes.sortedByDescending { it.updatedAt }.forEach { note ->
-                    appendLine("- 原句：${note.sentence}")
-                    if (note.translationText.isNotBlank()) {
-                        appendLine("  译文：${note.translationText}")
-                    }
-                    if (note.noteText.isNotBlank()) {
-                        appendLine("  笔记：${note.noteText}")
+                    if (note.isChatNoteForStorage()) {
+                        appendLine("- 类型：对话")
+                        appendLine("  原文：${note.sentence}")
+                        val question = note.chatQuestionForStorage()
+                        if (question.isNotBlank()) {
+                            appendLine("  提问：$question")
+                        }
+                        if (note.translationText.isNotBlank()) {
+                            appendLine("  回答：${note.translationText}")
+                        }
+                    } else {
+                        appendLine("- 类型：摘句")
+                        appendLine("  原文：${note.sentence}")
+                        if (note.translationText.isNotBlank()) {
+                            appendLine("  译文：${note.translationText}")
+                        }
+                        if (note.noteText.isNotBlank()) {
+                            appendLine("  笔记：${note.noteText}")
+                        }
                     }
                     appendLine("  位置：第 ${note.paragraphIndex + 1} 段")
                     appendLine("  时间：${formatExportTimestamp(note.updatedAt)}")
@@ -475,21 +490,26 @@ private fun ReaderNote.toJson(): JSONObject =
         .put("sentence", sentence)
         .put("translationText", translationText)
         .put("noteText", noteText)
+        .put("noteType", noteType.name)
         .put("createdAt", createdAt)
         .put("updatedAt", updatedAt)
 
-private fun JSONObject.toNote(): ReaderNote =
-    ReaderNote(
+private fun JSONObject.toNote(): ReaderNote {
+    val noteText = optString("noteText")
+    val parsedType = optString("noteType").toEnumOrDefault(ReaderNoteType.EXCERPT)
+    return ReaderNote(
         id = getString("id"),
         bookId = getString("bookId"),
         bookTitle = optString("bookTitle", "Untitled"),
         paragraphIndex = optInt("paragraphIndex"),
         sentence = optString("sentence"),
         translationText = optString("translationText"),
-        noteText = optString("noteText"),
+        noteText = noteText,
+        noteType = parsedType,
         createdAt = optLong("createdAt"),
         updatedAt = optLong("updatedAt"),
     )
+}
 
 private fun LookupHistoryEntry.toJson(): JSONObject =
     JSONObject()
@@ -557,6 +577,12 @@ private fun JSONObject.toChatMessage(): ChatMessage =
         content = optString("content"),
         createdAt = optLong("createdAt"),
     )
+
+private fun ReaderNote.isChatNoteForStorage(): Boolean =
+    noteType == ReaderNoteType.CHAT
+
+private fun ReaderNote.chatQuestionForStorage(): String =
+    noteText.trim()
 
 private fun LookupHistoryEntry.lookupKey(): String = lookupHistoryKey(type, sourceText)
 
