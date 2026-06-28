@@ -31,6 +31,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
@@ -39,6 +40,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -108,14 +110,11 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
-import androidx.compose.material3.SwipeToDismissBox
-import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -124,6 +123,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -456,8 +456,7 @@ private fun EngReadApp() {
         }
         scope.launch {
             sendingChatBookId = book.id
-            suggestingChatBookId = book.id
-            val result = withContext(Dispatchers.IO) {
+            val userMessageResult = withContext(Dispatchers.IO) {
                 runCatching {
                     val currentChat = repository.getBookChat(book.id)
                     val existingMessages = currentChat?.messages.orEmpty()
@@ -477,7 +476,26 @@ private fun EngReadApp() {
                         content = userContent,
                         createdAt = System.currentTimeMillis(),
                     )
-                    val recentMessages = existingMessages.takeLast(10) + userMessage
+                    repository.saveBookChat(
+                        book = book,
+                        summary = currentChat?.summary.orEmpty(),
+                        messages = existingMessages + userMessage,
+                    )
+                    userMessage
+                }
+            }
+            val userMessage = userMessageResult.getOrElse { error ->
+                sendingChatBookId = null
+                showMessage(error.message ?: "发送失败")
+                return@launch
+            }
+            refreshAll()
+
+            val answerResult = withContext(Dispatchers.IO) {
+                runCatching {
+                    val currentChat = repository.getBookChat(book.id)
+                    val messagesWithUser = currentChat?.messages.orEmpty()
+                    val recentMessages = messagesWithUser.takeLast(10)
                     val answer = OpenAiBookChat.reply(
                         book = book,
                         summary = currentChat?.summary.orEmpty(),
@@ -502,7 +520,7 @@ private fun EngReadApp() {
                     repository.saveBookChat(
                         book = book,
                         summary = nextSummary,
-                        messages = existingMessages + newMessages,
+                        messages = messagesWithUser + assistantMessage,
                     )
                     if (quotedParagraph.isNotBlank()) {
                         repository.addNote(
@@ -513,22 +531,15 @@ private fun EngReadApp() {
                             noteText = "对话：$content",
                         )
                     }
-                    runCatching {
-                        OpenAiBookChat.suggestQuestions(
-                            book = book,
-                            summary = nextSummary,
-                            recentMessages = (existingMessages + newMessages).takeLast(10),
-                            settings = settings.translation,
-                        )
-                    }.getOrElse { emptyList() }
+                    Unit
                 }
             }
             sendingChatBookId = null
-            suggestingChatBookId = null
-            result.onSuccess {
-                chatSuggestionsByBook = chatSuggestionsByBook + (book.id to it.ifEmpty { defaultReadingQuestions.randomThree() })
+            answerResult.onSuccess {
                 refreshAll()
+                requestChatSuggestions(book)
             }.onFailure { error ->
+                refreshAll()
                 showMessage(error.message ?: "对话失败")
             }
         }
@@ -1149,23 +1160,25 @@ private fun ChatScreen(
                             ChatThinkingBubble()
                         }
                     }
-                    item {
-                        ChatSuggestionsPanel(
-                            questions = visibleSuggestions,
-                            loading = suggestionsLoading,
-                            onQuestionClick = { question ->
-                                val book = selectedBook ?: return@ChatSuggestionsPanel
-                                onSendMessage(book, question)
-                            },
-                            onRefresh = {
-                                val book = selectedBook ?: return@ChatSuggestionsPanel
-                                if (messages.isEmpty()) {
-                                    localSuggestions = defaultReadingQuestions.randomThree()
-                                } else {
-                                    onRefreshSuggestions(book)
+                    if (!isSending) {
+                        item {
+                            ChatSuggestionsPanel(
+                                questions = visibleSuggestions,
+                                loading = suggestionsLoading,
+                                onQuestionClick = { question ->
+                                    val book = selectedBook ?: return@ChatSuggestionsPanel
+                                    onSendMessage(book, question)
+                                },
+                                onRefresh = {
+                                    val book = selectedBook ?: return@ChatSuggestionsPanel
+                                    if (messages.isEmpty()) {
+                                        localSuggestions = defaultReadingQuestions.randomThree()
+                                    } else {
+                                        onRefreshSuggestions(book)
+                                    }
                                 }
-                            }
-                        )
+                            )
+                        }
                     }
                 }
             }
@@ -2772,6 +2785,10 @@ private fun SelectionHandle(
     val horizontalInset = handleWidthPx / 2f
     val cursorHeight = with(density) { cursorHeightPx.toDp() }
     val primary = MaterialTheme.colorScheme.primary
+    val currentLayoutResult by rememberUpdatedState(layoutResult)
+    val currentFixedOffset by rememberUpdatedState(fixedOffset)
+    val currentCursorPosition by rememberUpdatedState(cursorPositionInText)
+    val currentHorizontalInset by rememberUpdatedState(horizontalInset)
     Box(
         modifier = Modifier
             .offset {
@@ -2782,24 +2799,27 @@ private fun SelectionHandle(
             }
             .width(handleWidth)
             .height(cursorHeight + 16.dp)
-            .pointerInput(layoutResult, fixedOffset, isStart, cursorPositionInText, cursorHeightPx) {
+            .pointerInput(isStart) {
                 var dragPosition = cursorPositionInText
                 detectDragGestures(
                     onDragStart = { start ->
+                        val cursor = currentCursorPosition
                         dragPosition = Offset(
-                            x = cursorPositionInText.x - horizontalInset + start.x,
-                            y = cursorPositionInText.y + start.y,
+                            x = cursor.x - currentHorizontalInset + start.x,
+                            y = cursor.y + start.y,
                         )
                     },
                     onDrag = { change, dragAmount ->
+                        val activeLayout = currentLayoutResult
+                        val activeFixedOffset = currentFixedOffset
                         dragPosition += dragAmount
-                        val maxOffset = (layoutResult.layoutInput.text.length - 1).coerceAtLeast(0)
-                        val offset = layoutResult.getOffsetForPosition(dragPosition).coerceIn(0, maxOffset)
+                        val maxOffset = (activeLayout.layoutInput.text.length - 1).coerceAtLeast(0)
+                        val offset = activeLayout.getOffsetForPosition(dragPosition).coerceIn(0, maxOffset)
                         if (isStart) {
-                            onSelectionChange(offset.coerceIn(0, fixedOffset), fixedOffset)
+                            onSelectionChange(offset.coerceIn(0, activeFixedOffset), activeFixedOffset)
                         } else {
-                            val minEnd = (fixedOffset + 1).coerceAtMost(maxOffset)
-                            onSelectionChange(fixedOffset, (offset - 1).coerceIn(minEnd, maxOffset))
+                            val minEnd = (activeFixedOffset + 1).coerceAtMost(maxOffset)
+                            onSelectionChange(activeFixedOffset, (offset - 1).coerceIn(minEnd, maxOffset))
                         }
                         change.consume()
                     },
@@ -3304,7 +3324,8 @@ private fun SelectionTip(
     val range = selectionRange ?: return
     val density = LocalDensity.current
     val configuration = LocalConfiguration.current
-    val tipWidthPx = with(density) { 246.dp.toPx() }
+    val tipWidth = 282.dp
+    val tipWidthPx = with(density) { tipWidth.toPx() }
     val horizontalMarginPx = with(density) { 12.dp.toPx() }
     val verticalGapPx = with(density) { 10.dp.toPx() }
     val tipHeightPx = with(density) { 48.dp.toPx() }
@@ -3326,27 +3347,39 @@ private fun SelectionTip(
         color = MaterialTheme.colorScheme.inverseSurface,
         modifier = Modifier
             .offset { IntOffset(x.roundToInt(), y.roundToInt()) }
-            .width(246.dp),
+            .width(tipWidth),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton(onClick = onTranslate, shape = RoundedCornerShape(8.dp)) {
+            TextButton(
+                onClick = onTranslate,
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+            ) {
                 Icon(Icons.Filled.Translate, contentDescription = null, modifier = Modifier.size(17.dp))
                 Spacer(Modifier.width(4.dp))
-                Text("翻译", color = MaterialTheme.colorScheme.inverseOnSurface)
+                Text("翻译", color = MaterialTheme.colorScheme.inverseOnSurface, maxLines = 1, softWrap = false)
             }
-            TextButton(onClick = onAddNote, shape = RoundedCornerShape(8.dp)) {
+            TextButton(
+                onClick = onAddNote,
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+            ) {
                 Icon(Icons.Filled.BookmarkAdd, contentDescription = null, modifier = Modifier.size(17.dp))
                 Spacer(Modifier.width(4.dp))
-                Text("摘句", color = MaterialTheme.colorScheme.inverseOnSurface)
+                Text("摘句", color = MaterialTheme.colorScheme.inverseOnSurface, maxLines = 1, softWrap = false)
             }
-            TextButton(onClick = onChat, shape = RoundedCornerShape(8.dp)) {
+            TextButton(
+                onClick = onChat,
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+            ) {
                 Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null, modifier = Modifier.size(17.dp))
                 Spacer(Modifier.width(4.dp))
-                Text("对话", color = MaterialTheme.colorScheme.inverseOnSurface)
+                Text("对话", color = MaterialTheme.colorScheme.inverseOnSurface, maxLines = 1, softWrap = false)
             }
         }
     }
@@ -4640,85 +4673,99 @@ private fun EmptyNotes(modifier: Modifier) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SwipeDeleteContainer(
     enabled: Boolean = true,
     onDelete: () -> Unit,
     content: @Composable () -> Unit,
 ) {
-    var deleteArmed by remember { mutableStateOf(false) }
+    val density = LocalDensity.current
+    val deleteWidth = 112.dp
+    val deleteWidthPx = with(density) { deleteWidth.toPx() }
+    var offsetX by remember { mutableStateOf(0f) }
+    val deleteArmed = offsetX <= -deleteWidthPx * 0.9f
+    val currentDeleteArmed by rememberUpdatedState(deleteArmed)
     LaunchedEffect(deleteArmed) {
         if (deleteArmed) {
-            delay(4_000)
-            deleteArmed = false
+            delay(5_000)
+            offsetX = 0f
         }
     }
-    val dismissState = rememberSwipeToDismissBoxState(
-        confirmValueChange = { value ->
-            if (enabled && value == SwipeToDismissBoxValue.EndToStart) {
-                if (deleteArmed) {
-                    deleteArmed = false
-                    onDelete()
-                } else {
-                    deleteArmed = true
-                }
-            }
-            false
-        },
-        positionalThreshold = { distance -> distance * 0.68f },
-    )
-    SwipeToDismissBox(
-        state = dismissState,
-        enableDismissFromStartToEnd = false,
-        enableDismissFromEndToStart = enabled,
-        gesturesEnabled = enabled,
-        backgroundContent = {
+    LaunchedEffect(enabled) {
+        if (!enabled) offsetX = 0f
+    }
+    Box(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .matchParentSize()
+                .clip(RoundedCornerShape(8.dp))
+                .background(MaterialTheme.colorScheme.errorContainer),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Box(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(
-                        if (deleteArmed) {
-                            MaterialTheme.colorScheme.errorContainer
-                        } else {
-                            MaterialTheme.colorScheme.tertiaryContainer
-                        },
-                    )
-                    .padding(end = 30.dp),
-                contentAlignment = Alignment.CenterEnd,
+                    .width(deleteWidth)
+                    .fillMaxHeight()
+                    .clickable(enabled = enabled && deleteArmed) {
+                        offsetX = 0f
+                        onDelete()
+                    },
+                contentAlignment = Alignment.Center,
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Text(
-                        text = if (deleteArmed) "再左拉删除" else "继续左拉",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = if (deleteArmed) {
-                            MaterialTheme.colorScheme.onErrorContainer
-                        } else {
-                            MaterialTheme.colorScheme.onTertiaryContainer
-                        },
-                    )
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Icon(
                         Icons.Filled.Delete,
                         contentDescription = "删除",
-                        tint = if (deleteArmed) {
-                            MaterialTheme.colorScheme.onErrorContainer
-                        } else {
-                            MaterialTheme.colorScheme.onTertiaryContainer
-                        },
+                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                    Text(
+                        text = "再左拉删除",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        maxLines = 1,
                     )
                 }
             }
-        },
-        content = {
-            Box(modifier = Modifier.fillMaxWidth()) {
-                content()
-            }
-        },
-    )
+        }
+        Box(
+            modifier = Modifier
+                .offset { IntOffset(offsetX.roundToInt(), 0) }
+                .pointerInput(enabled, deleteWidthPx) {
+                    if (!enabled) return@pointerInput
+                    var shouldDelete = false
+                    detectHorizontalDragGestures(
+                        onDragStart = { shouldDelete = false },
+                        onHorizontalDrag = { change, dragAmount ->
+                            val nextOffset = (offsetX + dragAmount)
+                                .coerceIn(-deleteWidthPx * 1.28f, 0f)
+                            if (currentDeleteArmed && nextOffset <= -deleteWidthPx * 1.12f) {
+                                shouldDelete = true
+                            }
+                            offsetX = nextOffset
+                            change.consume()
+                        },
+                        onDragEnd = {
+                            if (shouldDelete) {
+                                offsetX = 0f
+                                onDelete()
+                            } else {
+                                offsetX = if (offsetX <= -deleteWidthPx * 0.72f) {
+                                    -deleteWidthPx
+                                } else {
+                                    0f
+                                }
+                            }
+                        },
+                        onDragCancel = {
+                            offsetX = if (currentDeleteArmed) -deleteWidthPx else 0f
+                        },
+                    )
+                },
+        ) {
+            content()
+        }
+    }
 }
 
 @Composable
