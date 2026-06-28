@@ -1,5 +1,8 @@
 package com.engread.app.reader
 
+import com.engread.app.data.Book
+import com.engread.app.data.ChatMessage
+import com.engread.app.data.ChatRole
 import com.engread.app.data.TranslationSettings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -405,6 +408,131 @@ object OpenAiWordLookup {
                 ukPhonetic = root.optString("ukPhonetic", "").trim(),
             )
         }
+}
+
+object OpenAiBookChat {
+    suspend fun reply(
+        book: Book,
+        summary: String,
+        recentMessages: List<ChatMessage>,
+        settings: TranslationSettings,
+    ): String =
+        withContext(Dispatchers.IO) {
+            if (!settings.isConfigured) {
+                error("请先在设置里填写 Base URL、API Key 和模型。")
+            }
+            val currentUserMessage = recentMessages.lastOrNull { it.role == ChatRole.USER }?.content.orEmpty()
+            val latestFragments = recentMessages.dropLast(1).takeLast(10).toPromptTranscript().ifBlank { "暂无。" }
+            settings.createChatCompletion(
+                messages = JSONArray()
+                    .put(
+                        JSONObject()
+                            .put("role", "system")
+                            .put(
+                                "content",
+                                "You are EngRead's warm reading companion for Chinese readers of English books. " +
+                                    "Answer in Simplified Chinese with a gentle, practical tone. Use the compressed memory and recent turns. " +
+                                    "When useful, connect your answer to the current book. If you are unsure, say so briefly.",
+                            ),
+                    )
+                    .put(
+                        JSONObject()
+                            .put("role", "user")
+                            .put(
+                                "content",
+                                buildString {
+                                    appendLine("目前针对数据${book.toDiscussionDataPrompt()}进行讨论，")
+                                    appendLine("历史对话摘要：${summary.ifBlank { "暂无。" }}")
+                                    appendLine("最近话题：${summary.currentTopicForPrompt()}")
+                                    appendLine("最新对话片段：$latestFragments")
+                                    appendLine("当前用户说：$currentUserMessage")
+                                },
+                            ),
+                    ),
+                temperature = 0.35,
+            )
+        }
+
+    suspend fun summarize(
+        book: Book,
+        previousSummary: String,
+        newMessages: List<ChatMessage>,
+        settings: TranslationSettings,
+    ): String =
+        withContext(Dispatchers.IO) {
+            if (!settings.isConfigured) {
+                error("请先在设置里填写 Base URL、API Key 和模型。")
+            }
+            settings.createChatCompletion(
+                messages = JSONArray()
+                    .put(
+                        JSONObject()
+                            .put("role", "system")
+                            .put(
+                                "content",
+                                "You maintain compact long-term memory for a book chat. Output concise Simplified Chinese markdown only. " +
+                                    "Keep: history topic list and conclusions, current topic, each topic's user need, solution, key facts, external links, and citations/quotes if any. " +
+                                    "Update the old summary with the new user/assistant turn. Preserve useful prior facts and remove filler.",
+                            ),
+                    )
+                    .put(
+                        JSONObject()
+                            .put("role", "user")
+                            .put(
+                                "content",
+                                buildString {
+                                    appendLine("Book title: ${book.title}")
+                                    appendLine("Previous compressed memory:")
+                                    appendLine(previousSummary.ifBlank { "暂无。"})
+                                    appendLine()
+                                    appendLine("New raw messages:")
+                                    appendLine(newMessages.toPromptTranscript())
+                                    appendLine()
+                                    appendLine("Return the updated compressed memory.")
+                                },
+                            ),
+                    ),
+                temperature = 0.15,
+            )
+        }
+}
+
+private fun List<ChatMessage>.toPromptTranscript(): String =
+    joinToString("\n") { message ->
+        val role = when (message.role) {
+            ChatRole.USER -> "User"
+            ChatRole.ASSISTANT -> "Assistant"
+        }
+        "$role: ${message.content}"
+    }
+
+private fun Book.toDiscussionDataPrompt(): String =
+    buildString {
+        append("《").append(title).append("》")
+        append("（文件：").append(fileName.ifBlank { "未知" })
+        append("；类型：").append(sourceType.name)
+        append("；段落数：").append(paragraphs.size)
+        append("）")
+        val currentParagraph = paragraphs.getOrNull(lastReadParagraph)?.compactPromptText(240)
+        if (!currentParagraph.isNullOrBlank()) {
+            append("\n当前阅读附近文本：").append(currentParagraph)
+        }
+        if (toc.isNotEmpty()) {
+            append("\n目录片段：")
+            append(toc.take(12).joinToString("；") { it.title })
+        }
+    }
+
+private fun String.currentTopicForPrompt(): String =
+    lineSequence()
+        .firstOrNull { line -> line.contains("当前话题") || line.contains("最近话题") }
+        ?.let { line -> line.substringAfter("：", line).substringAfter(":", line).trim() }
+        ?.takeIf { it.isNotBlank() }
+        ?: "暂无明确最近话题"
+
+private fun String.compactPromptText(maxLength: Int): String {
+    val normalized = replace(Regex("\\s+"), " ").trim()
+    return if (normalized.length <= maxLength) normalized else normalized.take(maxLength).trimEnd() + "..."
 }
 
 private fun JSONObject.optStringList(name: String): List<String> {

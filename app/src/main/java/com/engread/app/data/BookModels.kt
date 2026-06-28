@@ -97,3 +97,23 @@ enum class LookupHistoryType(val label: String) {
     WORD("查词"),
     TRANSLATION("翻译"),
 }
+
+data class BookChat(
+    val bookId: String,
+    val bookTitle: String,
+    val summary: String = "",
+    val messages: List<ChatMessage> = emptyList(),
+    val updatedAt: Long = 0L,
+)
+
+data class ChatMessage(
+    val id: String,
+    val role: ChatRole,
+    val content: String,
+    val createdAt: Long,
+)
+
+enum class ChatRole {
+    USER,
+    ASSISTANT,
+}

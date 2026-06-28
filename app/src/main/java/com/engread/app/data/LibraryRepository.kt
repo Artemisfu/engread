@@ -6,6 +6,8 @@ import com.engread.app.parser.BookImporter
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 import java.util.UUID
 
@@ -16,6 +18,7 @@ class LibraryRepository(
     private val libraryFile = File(context.filesDir, "engread-library.json")
     private val notesFile = File(context.filesDir, "engread-notes.json")
     private val lookupHistoryFile = File(context.filesDir, "engread-lookup-history.json")
+    private val chatsFile = File(context.filesDir, "engread-chats.json")
     private val settingsFile = File(context.filesDir, "engread-settings.json")
     private val progressFile = File(context.filesDir, "engread-progress.json")
 
@@ -82,6 +85,7 @@ class LibraryRepository(
         saveBooks(getBooks().filterNot { it.id == bookId })
         saveNotes(getNotes().filterNot { it.bookId == bookId })
         saveLookupHistory(getLookupHistory().filterNot { it.bookId == bookId })
+        saveBookChats(getBookChats().filterNot { it.bookId == bookId })
         saveProgress(getProgress().filterKeys { it != bookId })
     }
 
@@ -234,6 +238,43 @@ class LibraryRepository(
         saveLookupHistory(getLookupHistory().filterNot { it.id == id })
     }
 
+    @Synchronized
+    fun getBookChats(): List<BookChat> {
+        if (!chatsFile.exists()) return emptyList()
+        val root = runCatching { JSONObject(chatsFile.readText()) }.getOrNull() ?: return emptyList()
+        val items = root.optJSONArray("chats") ?: JSONArray()
+        return buildList {
+            for (index in 0 until items.length()) {
+                val item = items.optJSONObject(index) ?: continue
+                runCatching { item.toBookChat() }.getOrNull()?.let { add(it) }
+            }
+        }.sortedByDescending { it.updatedAt }
+    }
+
+    @Synchronized
+    fun getBookChat(bookId: String): BookChat? =
+        getBookChats().firstOrNull { it.bookId == bookId }
+
+    @Synchronized
+    fun hasBookChat(bookId: String): Boolean {
+        val chat = getBookChat(bookId) ?: return false
+        return chat.summary.isNotBlank() || chat.messages.isNotEmpty()
+    }
+
+    @Synchronized
+    fun saveBookChat(book: Book, summary: String, messages: List<ChatMessage>): BookChat {
+        val now = System.currentTimeMillis()
+        val chat = BookChat(
+            bookId = book.id,
+            bookTitle = book.title,
+            summary = summary.trim(),
+            messages = messages,
+            updatedAt = now,
+        )
+        saveBookChats(listOf(chat) + getBookChats().filterNot { it.bookId == book.id })
+        return chat
+    }
+
     fun buildNotesMarkdown(notes: List<ReaderNote> = getNotes()): String {
         if (notes.isEmpty()) {
             return "# EngRead Notes\n\n暂无笔记。\n"
@@ -253,7 +294,7 @@ class LibraryRepository(
                         appendLine("  笔记：${note.noteText}")
                     }
                     appendLine("  位置：第 ${note.paragraphIndex + 1} 段")
-                    appendLine("  时间：${note.updatedAt}")
+                    appendLine("  时间：${formatExportTimestamp(note.updatedAt)}")
                     appendLine()
                 }
             }
@@ -279,6 +320,13 @@ class LibraryRepository(
             history.forEach { array.put(it.toJson()) }
         })
         lookupHistoryFile.writeText(root.toString(2))
+    }
+
+    private fun saveBookChats(chats: List<BookChat>) {
+        val root = JSONObject().put("chats", JSONArray().also { array ->
+            chats.forEach { array.put(it.toJson()) }
+        })
+        chatsFile.writeText(root.toString(2))
     }
 
     private fun getProgress(): Map<String, StoredProgress> {
@@ -460,6 +508,46 @@ private fun JSONObject.toLookupHistoryEntry(): LookupHistoryEntry =
         updatedAt = optLong("updatedAt", optLong("createdAt")),
     )
 
+private fun BookChat.toJson(): JSONObject =
+    JSONObject()
+        .put("bookId", bookId)
+        .put("bookTitle", bookTitle)
+        .put("summary", summary)
+        .put("messages", JSONArray().also { array -> messages.forEach { array.put(it.toJson()) } })
+        .put("updatedAt", updatedAt)
+
+private fun JSONObject.toBookChat(): BookChat {
+    val messageArray = optJSONArray("messages") ?: JSONArray()
+    val messages = buildList {
+        for (index in 0 until messageArray.length()) {
+            val item = messageArray.optJSONObject(index) ?: continue
+            runCatching { item.toChatMessage() }.getOrNull()?.let { add(it) }
+        }
+    }
+    return BookChat(
+        bookId = optString("bookId"),
+        bookTitle = optString("bookTitle", "Untitled"),
+        summary = optString("summary"),
+        messages = messages,
+        updatedAt = optLong("updatedAt"),
+    )
+}
+
+private fun ChatMessage.toJson(): JSONObject =
+    JSONObject()
+        .put("id", id)
+        .put("role", role.name)
+        .put("content", content)
+        .put("createdAt", createdAt)
+
+private fun JSONObject.toChatMessage(): ChatMessage =
+    ChatMessage(
+        id = optString("id").ifBlank { UUID.randomUUID().toString() },
+        role = optString("role").toEnumOrDefault(ChatRole.USER),
+        content = optString("content"),
+        createdAt = optLong("createdAt"),
+    )
+
 private fun LookupHistoryEntry.lookupKey(): String = lookupHistoryKey(type, sourceText)
 
 private fun lookupHistoryKey(type: LookupHistoryType, sourceText: String): String {
@@ -468,4 +556,9 @@ private fun lookupHistoryKey(type: LookupHistoryType, sourceText: String): Strin
         LookupHistoryType.WORD -> normalized.lowercase(Locale.US)
         LookupHistoryType.TRANSLATION -> normalized
     }
+}
+
+private fun formatExportTimestamp(timestamp: Long): String {
+    if (timestamp <= 0L) return "未知"
+    return SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(timestamp))
 }

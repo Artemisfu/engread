@@ -62,7 +62,9 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.Notes
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoStories
 import androidx.compose.material.icons.filled.BookmarkAdd
@@ -154,6 +156,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.text.KeyboardOptions
 import com.engread.app.data.Book
+import com.engread.app.data.BookChat
+import com.engread.app.data.ChatMessage
+import com.engread.app.data.ChatRole
 import com.engread.app.data.LibraryRepository
 import com.engread.app.data.LookupHistoryEntry
 import com.engread.app.data.LookupHistoryType
@@ -163,6 +168,7 @@ import com.engread.app.data.ReaderSettings
 import com.engread.app.data.ReaderTheme
 import com.engread.app.reader.BookChapter
 import com.engread.app.reader.EcdictDictionary
+import com.engread.app.reader.OpenAiBookChat
 import com.engread.app.reader.OpenAiChatTranslator
 import com.engread.app.reader.OpenAiWordLookup
 import com.engread.app.reader.ReaderPage
@@ -180,6 +186,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
+import java.util.UUID
 import kotlin.math.roundToInt
 
 private object ReaderVolumeKeyPager {
@@ -250,6 +257,7 @@ class MainActivity : ComponentActivity() {
 private sealed class AppScreen {
     object Shelf : AppScreen()
     object Notes : AppScreen()
+    object Chat : AppScreen()
     object Settings : AppScreen()
     data class Reader(val bookId: String) : AppScreen()
 }
@@ -259,6 +267,7 @@ private val AppScreenSaver = Saver<AppScreen, String>(
         when (screen) {
             AppScreen.Shelf -> "shelf"
             AppScreen.Notes -> "notes"
+            AppScreen.Chat -> "chat"
             AppScreen.Settings -> "settings"
             is AppScreen.Reader -> "reader:${screen.bookId}"
         }
@@ -266,6 +275,7 @@ private val AppScreenSaver = Saver<AppScreen, String>(
     restore = { value ->
         when {
             value == "notes" -> AppScreen.Notes
+            value == "chat" -> AppScreen.Chat
             value == "settings" -> AppScreen.Settings
             value.startsWith("reader:") && value.length > "reader:".length -> {
                 AppScreen.Reader(value.substringAfter("reader:"))
@@ -288,13 +298,16 @@ private fun EngReadApp() {
     var books by remember { mutableStateOf(repository.getBooks()) }
     var notes by remember { mutableStateOf(repository.getNotes()) }
     var lookupHistory by remember { mutableStateOf(repository.getLookupHistory()) }
+    var bookChats by remember { mutableStateOf(repository.getBookChats()) }
     var settings by remember { mutableStateOf(repository.getSettings()) }
+    var sendingChatBookId by remember { mutableStateOf<String?>(null) }
     var lastHomeBackAt by remember { mutableStateOf(0L) }
 
     fun refreshAll() {
         books = repository.getBooks()
         notes = repository.getNotes()
         lookupHistory = repository.getLookupHistory()
+        bookChats = repository.getBookChats()
         settings = repository.getSettings()
     }
 
@@ -320,6 +333,7 @@ private fun EngReadApp() {
             }
 
             AppScreen.Notes,
+            AppScreen.Chat,
             AppScreen.Settings -> screen = AppScreen.Shelf
         }
     }
@@ -356,11 +370,69 @@ private fun EngReadApp() {
         }
     }
 
+    fun sendBookChatMessage(book: Book, text: String) {
+        val content = text.trim()
+        if (content.isBlank()) return
+        if (!settings.translation.isConfigured) {
+            showMessage("请先在设置里填写 Base URL、API Key 和模型")
+            return
+        }
+        scope.launch {
+            sendingChatBookId = book.id
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val currentChat = repository.getBookChat(book.id)
+                    val existingMessages = currentChat?.messages.orEmpty()
+                    val userMessage = ChatMessage(
+                        id = UUID.randomUUID().toString(),
+                        role = ChatRole.USER,
+                        content = content,
+                        createdAt = System.currentTimeMillis(),
+                    )
+                    val recentMessages = existingMessages.takeLast(10) + userMessage
+                    val answer = OpenAiBookChat.reply(
+                        book = book,
+                        summary = currentChat?.summary.orEmpty(),
+                        recentMessages = recentMessages,
+                        settings = settings.translation,
+                    )
+                    val assistantMessage = ChatMessage(
+                        id = UUID.randomUUID().toString(),
+                        role = ChatRole.ASSISTANT,
+                        content = answer,
+                        createdAt = System.currentTimeMillis(),
+                    )
+                    val newMessages = listOf(userMessage, assistantMessage)
+                    val nextSummary = runCatching {
+                        OpenAiBookChat.summarize(
+                            book = book,
+                            previousSummary = currentChat?.summary.orEmpty(),
+                            newMessages = newMessages,
+                            settings = settings.translation,
+                        )
+                    }.getOrElse { currentChat?.summary.orEmpty() }
+                    repository.saveBookChat(
+                        book = book,
+                        summary = nextSummary,
+                        messages = existingMessages + newMessages,
+                    )
+                }
+            }
+            sendingChatBookId = null
+            result.onSuccess {
+                refreshAll()
+            }.onFailure { error ->
+                showMessage(error.message ?: "对话失败")
+            }
+        }
+    }
+
     EngReadTheme(readerTheme = settings.theme) {
         Box(modifier = Modifier.fillMaxSize()) {
             when (val current = screen) {
                 AppScreen.Shelf -> ShelfScreen(
                     books = books,
+                    bookChats = bookChats,
                     modifier = Modifier.fillMaxSize(),
                     bottomBar = {
                         HomeBottomBar(
@@ -504,6 +576,20 @@ private fun EngReadApp() {
                     },
                 )
 
+                AppScreen.Chat -> ChatScreen(
+                    books = books,
+                    bookChats = bookChats,
+                    sendingBookId = sendingChatBookId,
+                    modifier = Modifier.fillMaxSize(),
+                    bottomBar = {
+                        HomeBottomBar(
+                            current = AppScreen.Chat,
+                            onSelect = { screen = it },
+                        )
+                    },
+                    onSendMessage = { book, text -> sendBookChatMessage(book, text) },
+                )
+
                 AppScreen.Settings -> SettingsScreen(
                     settings = settings,
                     modifier = Modifier.fillMaxSize(),
@@ -561,6 +647,13 @@ private fun HomeBottomBar(
             colors = itemColors,
         )
         NavigationBarItem(
+            selected = current == AppScreen.Chat,
+            onClick = { onSelect(AppScreen.Chat) },
+            icon = { Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null) },
+            label = { Text("对话") },
+            colors = itemColors,
+        )
+        NavigationBarItem(
             selected = current == AppScreen.Settings,
             onClick = { onSelect(AppScreen.Settings) },
             icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
@@ -614,6 +707,7 @@ private fun WordEntry.mergeLlmWordDetails(enriched: WordEntry): WordEntry =
 @Composable
 private fun ShelfScreen(
     books: List<Book>,
+    bookChats: List<BookChat>,
     modifier: Modifier = Modifier,
     bottomBar: @Composable () -> Unit,
     onImport: () -> Unit,
@@ -621,6 +715,10 @@ private fun ShelfScreen(
     onDeleteBook: (Book) -> Unit,
 ) {
     var pendingDelete by remember { mutableStateOf<Book?>(null) }
+    var pendingDeleteSecondConfirm by remember { mutableStateOf<Book?>(null) }
+    fun hasChat(book: Book): Boolean =
+        bookChats.any { it.bookId == book.id && (it.summary.isNotBlank() || it.messages.isNotEmpty()) }
+
     Scaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
@@ -672,24 +770,62 @@ private fun ShelfScreen(
     }
 
     pendingDelete?.let { book ->
+        val bookHasChat = hasChat(book)
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
             icon = { Icon(Icons.Filled.Delete, contentDescription = null) },
-            title = { Text("删除书籍？") },
-            text = { Text("《${book.title}》和它的笔记会从本机移除。") },
+            title = { Text(if (bookHasChat) "这本书有对话记录" else "删除书籍？") },
+            text = {
+                Text(
+                    if (bookHasChat) {
+                        "《${book.title}》已有对话内容。删除会同时移除书籍、笔记、查词和对话记录，需要再次确认。"
+                    } else {
+                        "《${book.title}》和它的笔记会从本机移除。"
+                    },
+                )
+            },
             confirmButton = {
                 Button(
                     onClick = {
                         pendingDelete = null
-                        onDeleteBook(book)
+                        if (bookHasChat) {
+                            pendingDeleteSecondConfirm = book
+                        } else {
+                            onDeleteBook(book)
+                        }
                     },
                     shape = RoundedCornerShape(8.dp),
                 ) {
-                    Text("删除")
+                    Text(if (bookHasChat) "继续" else "删除")
                 }
             },
             dismissButton = {
                 TextButton(onClick = { pendingDelete = null }) {
+                    Text("取消")
+                }
+            },
+        )
+    }
+
+    pendingDeleteSecondConfirm?.let { book ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteSecondConfirm = null },
+            icon = { Icon(Icons.Filled.Delete, contentDescription = null) },
+            title = { Text("确认删除？") },
+            text = { Text("将永久删除《${book.title}》及其对话记录。") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingDeleteSecondConfirm = null
+                        onDeleteBook(book)
+                    },
+                    shape = RoundedCornerShape(8.dp),
+                ) {
+                    Text("确认删除")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteSecondConfirm = null }) {
                     Text("取消")
                 }
             },
@@ -742,6 +878,302 @@ private fun EmptyShelf(
                 Spacer(Modifier.width(8.dp))
                 Text("选择 TXT / EPUB / MOBI / AZW3")
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChatScreen(
+    books: List<Book>,
+    bookChats: List<BookChat>,
+    sendingBookId: String?,
+    modifier: Modifier = Modifier,
+    bottomBar: @Composable () -> Unit,
+    onSendMessage: (Book, String) -> Unit,
+) {
+    var selectedBookId by rememberSaveable { mutableStateOf("") }
+    val preferredBookId = remember(books, bookChats) {
+        bookChats.firstOrNull { chat -> books.any { it.id == chat.bookId } }?.bookId
+            ?: books.firstOrNull()?.id
+            ?: ""
+    }
+    LaunchedEffect(preferredBookId, books.map { it.id }) {
+        if (selectedBookId.isBlank() || books.none { it.id == selectedBookId }) {
+            selectedBookId = preferredBookId
+        }
+    }
+    val selectedBook = books.firstOrNull { it.id == selectedBookId }
+    val selectedChat = selectedBook?.let { book ->
+        bookChats.firstOrNull { it.bookId == book.id }
+    }
+    val messages = selectedChat?.messages.orEmpty()
+    val listState = rememberLazyListState()
+    val isSending = selectedBook != null && sendingBookId == selectedBook.id
+    var input by rememberSaveable(selectedBookId) { mutableStateOf("") }
+
+    LaunchedEffect(messages.size, isSending) {
+        if (messages.isNotEmpty()) {
+            listState.animateScrollToItem((messages.size - 1).coerceAtLeast(0))
+        }
+    }
+
+    Scaffold(
+        modifier = modifier.fillMaxSize(),
+        topBar = {
+            CenterAlignedTopAppBar(
+                title = {
+                    Text(
+                        text = selectedBook?.title ?: "对话",
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        fontWeight = FontWeight.Black,
+                    )
+                },
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background,
+                ),
+            )
+        },
+        bottomBar = {
+            Column {
+                ChatInputBar(
+                    value = input,
+                    enabled = selectedBook != null && !isSending,
+                    sending = isSending,
+                    onValueChange = { input = it },
+                    onSend = {
+                        val book = selectedBook ?: return@ChatInputBar
+                        val text = input
+                        input = ""
+                        onSendMessage(book, text)
+                    },
+                )
+                bottomBar()
+            }
+        },
+    ) { padding ->
+        if (books.isEmpty()) {
+            EmptyChat(modifier = Modifier.padding(padding).fillMaxSize())
+        } else {
+            Column(
+                modifier = Modifier
+                    .padding(padding)
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background),
+            ) {
+                BookChatSelector(
+                    books = books,
+                    selectedBook = selectedBook,
+                    bookChats = bookChats,
+                    onSelect = { selectedBookId = it.id },
+                )
+                if (messages.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .padding(24.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = "可以问这本书的人物、情节、词句和读书计划。",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        itemsIndexed(messages, key = { _, message -> message.id }) { _, message ->
+                            ChatMessageBubble(message)
+                        }
+                        if (isSending) {
+                            item {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.Start,
+                                ) {
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = MaterialTheme.colorScheme.surface,
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        ) {
+                                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                            Text("思考中", style = MaterialTheme.typography.bodyMedium)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BookChatSelector(
+    books: List<Book>,
+    selectedBook: Book?,
+    bookChats: List<BookChat>,
+    onSelect: (Book) -> Unit,
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+    ) {
+        AssistChip(
+            onClick = { menuOpen = true },
+            label = {
+                Text(
+                    text = selectedBook?.title ?: "选择书籍",
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            },
+            leadingIcon = { Icon(Icons.Filled.AutoStories, contentDescription = null) },
+        )
+        DropdownMenu(
+            expanded = menuOpen,
+            onDismissRequest = { menuOpen = false },
+        ) {
+            books.forEach { book ->
+                val hasChat = bookChats.any { it.bookId == book.id && it.messages.isNotEmpty() }
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            text = if (hasChat) "${book.title} · 有对话" else book.title,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    },
+                    onClick = {
+                        menuOpen = false
+                        onSelect(book)
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChatMessageBubble(message: ChatMessage) {
+    val fromUser = message.role == ChatRole.USER
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = if (fromUser) Arrangement.End else Arrangement.Start,
+    ) {
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = if (fromUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+            modifier = Modifier.fillMaxWidth(0.86f),
+        ) {
+            Column(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    text = if (fromUser) "我" else "EngRead",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (fromUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    text = message.content,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChatInputBar(
+    value: String,
+    enabled: Boolean,
+    sending: Boolean,
+    onValueChange: (String) -> Unit,
+    onSend: () -> Unit,
+) {
+    Surface(
+        tonalElevation = 2.dp,
+        color = MaterialTheme.colorScheme.background,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            TextField(
+                value = value,
+                onValueChange = onValueChange,
+                enabled = enabled,
+                placeholder = { Text("和这本书聊聊...") },
+                minLines = 1,
+                maxLines = 5,
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 54.dp, max = 144.dp),
+                shape = RoundedCornerShape(8.dp),
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = MaterialTheme.colorScheme.surface,
+                    unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                    disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    focusedIndicatorColor = Color.Transparent,
+                    unfocusedIndicatorColor = Color.Transparent,
+                    disabledIndicatorColor = Color.Transparent,
+                ),
+            )
+            IconButton(
+                onClick = onSend,
+                enabled = enabled && value.trim().isNotBlank() && !sending,
+            ) {
+                if (sending) {
+                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                } else {
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "发送")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyChat(modifier: Modifier) {
+    Box(
+        modifier = modifier.padding(24.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Icon(
+                Icons.AutoMirrored.Filled.Chat,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(42.dp),
+            )
+            Text("先导入一本书，再开始对话", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         }
     }
 }
@@ -1888,16 +2320,18 @@ private fun SelectionHandles(
     val endCursor = Offset(endRect.left, endRect.top)
 
     SelectionHandle(
-        parentPosition = textOrigin + Offset(startRect.left, startRect.bottom),
+        parentPosition = textOrigin + Offset(startRect.left, startRect.top),
         cursorPositionInText = startCursor,
+        cursorHeightPx = (startRect.bottom - startRect.top).coerceAtLeast(1f),
         layoutResult = layout,
         fixedOffset = endInclusive,
         isStart = true,
         onSelectionChange = onSelectionChange,
     )
     SelectionHandle(
-        parentPosition = textOrigin + Offset(endRect.left, endRect.bottom),
+        parentPosition = textOrigin + Offset(endRect.left, endRect.top),
         cursorPositionInText = endCursor,
+        cursorHeightPx = (endRect.bottom - endRect.top).coerceAtLeast(1f),
         layoutResult = layout,
         fixedOffset = range.first,
         isStart = false,
@@ -1909,6 +2343,7 @@ private fun SelectionHandles(
 private fun SelectionHandle(
     parentPosition: Offset,
     cursorPositionInText: Offset,
+    cursorHeightPx: Float,
     layoutResult: TextLayoutResult,
     fixedOffset: Int,
     isStart: Boolean,
@@ -1916,17 +2351,19 @@ private fun SelectionHandle(
 ) {
     val density = LocalDensity.current
     val horizontalInset = with(density) { 13.dp.toPx() }
+    val cursorHeight = with(density) { cursorHeightPx.toDp() }
     val primary = MaterialTheme.colorScheme.primary
     Box(
         modifier = Modifier
             .offset {
                 IntOffset(
                     x = (parentPosition.x - horizontalInset).roundToInt(),
-                    y = (parentPosition.y - 2f).roundToInt(),
+                    y = parentPosition.y.roundToInt(),
                 )
             }
-            .size(width = 26.dp, height = 42.dp)
-            .pointerInput(layoutResult, fixedOffset, isStart, cursorPositionInText) {
+            .width(26.dp)
+            .height(cursorHeight + 18.dp)
+            .pointerInput(layoutResult, fixedOffset, isStart, cursorPositionInText, cursorHeightPx) {
                 var dragPosition = cursorPositionInText
                 detectDragGestures(
                     onDragStart = { dragPosition = cursorPositionInText },
@@ -1948,7 +2385,7 @@ private fun SelectionHandle(
             Box(
                 modifier = Modifier
                     .width(2.dp)
-                    .height(24.dp)
+                    .height(cursorHeight)
                     .background(primary),
             )
             Box(
@@ -2442,12 +2879,19 @@ private fun SelectionTip(
     val configuration = LocalConfiguration.current
     val tipWidthPx = with(density) { 168.dp.toPx() }
     val horizontalMarginPx = with(density) { 12.dp.toPx() }
-    val verticalGapPx = with(density) { 8.dp.toPx() }
-    val endOffset = (range.last + 1).coerceIn(0, layout.layoutInput.text.length)
-    val endRect = layout.getCursorRect(endOffset)
+    val verticalGapPx = with(density) { 10.dp.toPx() }
+    val tipHeightPx = with(density) { 48.dp.toPx() }
+    val startOffset = range.first.coerceIn(0, layout.layoutInput.text.length)
+    val startLine = layout.getLineForOffset(startOffset)
+    val lineLeft = layout.getLineLeft(startLine)
+    val lineRight = layout.getLineRight(startLine)
+    val lineTop = layout.getLineTop(startLine)
+    val lineBottom = layout.getLineBottom(startLine)
     val maxX = with(density) { configuration.screenWidthDp.dp.toPx() } - tipWidthPx - horizontalMarginPx
-    val x = (textOrigin.x + endRect.left - tipWidthPx / 2f).coerceIn(horizontalMarginPx, maxX.coerceAtLeast(horizontalMarginPx))
-    val y = textOrigin.y + endRect.bottom + verticalGapPx
+    val x = (textOrigin.x + (lineLeft + lineRight) / 2f - tipWidthPx / 2f)
+        .coerceIn(horizontalMarginPx, maxX.coerceAtLeast(horizontalMarginPx))
+    val preferredY = textOrigin.y + lineTop - tipHeightPx - verticalGapPx
+    val y = if (preferredY >= 0f) preferredY else textOrigin.y + lineBottom + verticalGapPx
     Surface(
         tonalElevation = 6.dp,
         shadowElevation = 8.dp,
