@@ -1385,14 +1385,14 @@ private fun ChatScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 1.dp),
+                            .padding(horizontal = 12.dp),
                         horizontalArrangement = Arrangement.End,
                     ) {
                         Surface(
                             shape = RoundedCornerShape(999.dp),
-                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.78f),
+                            color = MaterialTheme.colorScheme.inverseSurface,
                             modifier = Modifier
-                                .heightIn(min = 24.dp)
+                                .heightIn(min = 22.dp)
                                 .clickable {
                                     scope.launch {
                                         val target = listState.layoutInfo.totalItemsCount - 1
@@ -1403,8 +1403,8 @@ private fun ChatScreen(
                             Text(
                                 text = "看最新",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp),
+                                color = MaterialTheme.colorScheme.inverseOnSurface,
+                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 2.dp),
                             )
                         }
                     }
@@ -1564,7 +1564,7 @@ private fun BookChatSelector(
             modifier = Modifier.size(40.dp),
         ) {
             Icon(
-                Icons.Filled.PlayArrow,
+                Icons.AutoMirrored.Filled.ArrowBack,
                 contentDescription = "继续读",
                 tint = if (selectedBook != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
             )
