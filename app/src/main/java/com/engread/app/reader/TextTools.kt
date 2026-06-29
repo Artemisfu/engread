@@ -687,11 +687,12 @@ private suspend fun TranslationSettings.createBookToolLoopCompletionStreaming(
         val toolCalls = message.optJSONArray("tool_calls")
         if (toolCalls == null || toolCalls.length() == 0) {
             finalMarkerParser.flushThinking(onChunk)
-            finalMarkerParser.flushFinal(onChunk)
             if (!finalMarkerParser.finalStarted && lastContent.isNotBlank()) {
-                val fallbackFinal = lastContent.stripBookChatFinalMarker()
-                finalMarkerParser.replaceFinal(fallbackFinal, onChunk)
+                finalMarkerParser.promoteThinkingToFinal(lastContent, onChunk)
+            } else if (!finalMarkerParser.finalStarted) {
+                finalMarkerParser.promoteThinkingToFinal("", onChunk)
             }
+            finalMarkerParser.flushFinal(onChunk)
             return finalMarkerParser.finalText().takeIf { it.isNotBlank() }
                 ?: lastContent.stripBookChatFinalMarker().takeIf { it.isNotBlank() }
                 ?: error("服务没有返回可用内容。")
@@ -715,6 +716,9 @@ private suspend fun TranslationSettings.createBookToolLoopCompletionStreaming(
         }
     }
     finalMarkerParser.flushThinking(onChunk)
+    if (!finalMarkerParser.finalStarted) {
+        finalMarkerParser.promoteThinkingToFinal(lastContent, onChunk)
+    }
     finalMarkerParser.flushFinal(onChunk)
     return finalMarkerParser.finalText().takeIf { it.isNotBlank() }
         ?: lastContent.stripBookChatFinalMarker().takeIf { it.isNotBlank() }
@@ -965,6 +969,7 @@ private class BookChatFinalMarkerParser(
     private val marker: String = BookChatFinalAnswerMarker,
 ) {
     private val pending = StringBuilder()
+    private val thinkingBuilder = StringBuilder()
     private val finalPending = StringBuilder()
     private val finalBuilder = StringBuilder()
     var finalStarted: Boolean = false
@@ -984,6 +989,7 @@ private class BookChatFinalMarkerParser(
         if (markerIndex >= 0) {
             val before = pending.substring(0, markerIndex)
             if (before.isNotEmpty()) {
+                thinkingBuilder.append(before)
                 onChunk(BookChatStreamChunk(BookChatStreamChunkType.THINKING_APPEND, before))
             }
             val after = pending.substring(markerIndex + marker.length)
@@ -1000,6 +1006,7 @@ private class BookChatFinalMarkerParser(
         if (emitLength > 0) {
             val thinking = pending.substring(0, emitLength)
             pending.delete(0, emitLength)
+            thinkingBuilder.append(thinking)
             onChunk(BookChatStreamChunk(BookChatStreamChunkType.THINKING_APPEND, thinking))
         }
     }
@@ -1008,6 +1015,7 @@ private class BookChatFinalMarkerParser(
         if (!finalStarted && pending.isNotEmpty()) {
             val thinking = pending.toString()
             pending.clear()
+            thinkingBuilder.append(thinking)
             onChunk(BookChatStreamChunk(BookChatStreamChunkType.THINKING_APPEND, thinking))
         }
     }
@@ -1023,12 +1031,25 @@ private class BookChatFinalMarkerParser(
         onChunk: suspend (BookChatStreamChunk) -> Unit,
     ) {
         pending.clear()
+        thinkingBuilder.clear()
         finalPending.clear()
         finalBuilder.clear()
         val cleaned = text.stripBookChatFinalMarker()
         finalBuilder.append(cleaned)
         finalStarted = true
         onChunk(BookChatStreamChunk(BookChatStreamChunkType.FINAL_REPLACE, cleaned))
+    }
+
+    suspend fun promoteThinkingToFinal(
+        fallbackText: String,
+        onChunk: suspend (BookChatStreamChunk) -> Unit,
+    ): Boolean {
+        if (finalStarted) return false
+        val promoted = fallbackText.stripBookChatFinalMarker()
+            .ifBlank { (thinkingBuilder.toString() + pending.toString()).stripBookChatFinalMarker() }
+        if (promoted.isBlank()) return false
+        replaceFinal(promoted, onChunk)
+        return true
     }
 
     fun finalText(): String = (finalBuilder.toString() + finalPending.toString()).stripBookChatFinalMarker()
