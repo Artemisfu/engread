@@ -602,6 +602,7 @@ private fun ChatMessage.toJson(): JSONObject =
         .put("id", id)
         .put("role", role.name)
         .put("content", content)
+        .put("thinking", thinking)
         .put("createdAt", createdAt)
 
 private fun JSONObject.toChatMessage(): ChatMessage =
@@ -609,6 +610,7 @@ private fun JSONObject.toChatMessage(): ChatMessage =
         id = optString("id").ifBlank { UUID.randomUUID().toString() },
         role = optString("role").toEnumOrDefault(ChatRole.USER),
         content = optString("content"),
+        thinking = optString("thinking"),
         createdAt = optLong("createdAt"),
     )
 

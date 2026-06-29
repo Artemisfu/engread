@@ -174,6 +174,7 @@ import com.engread.app.data.ReaderNoteType
 import com.engread.app.data.ReaderSettings
 import com.engread.app.data.ReaderTheme
 import com.engread.app.reader.BookChapter
+import com.engread.app.reader.BookChatStreamChunkType
 import com.engread.app.reader.EcdictDictionary
 import com.engread.app.reader.OpenAiBookChat
 import com.engread.app.reader.OpenAiChatTranslator
@@ -584,21 +585,34 @@ private fun EngReadApp() {
                 runCatching {
                     val recentMessages = messagesWithUser.takeLast(10)
                     val streamedAnswer = StringBuilder()
+                    val streamedThinking = StringBuilder()
                     val answer = OpenAiBookChat.replyStreaming(
                         book = book,
                         summary = chatBeforeAnswer?.summary.orEmpty(),
                         recentMessages = recentMessages,
                         settings = settings.translation,
-                    ) { delta ->
-                        streamedAnswer.append(delta)
-                        val partial = streamedAnswer.toString()
+                    ) { chunk ->
+                        when (chunk.type) {
+                            BookChatStreamChunkType.THINKING_APPEND -> streamedThinking.append(chunk.text)
+                            BookChatStreamChunkType.FINAL_APPEND -> streamedAnswer.append(chunk.text)
+                            BookChatStreamChunkType.FINAL_REPLACE -> {
+                                streamedAnswer.clear()
+                                streamedAnswer.append(chunk.text)
+                                if (streamedThinking.isNotBlank()) streamedThinking.clear()
+                            }
+                        }
+                        val partialAnswer = streamedAnswer.toString()
+                        val partialThinking = streamedThinking.toString()
                         withContext(Dispatchers.Main) {
                             bookChats = bookChats.map { chat ->
                                 if (chat.bookId == book.id) {
                                     chat.copy(
                                         messages = chat.messages.map { message ->
                                             if (message.id == assistantMessage.id) {
-                                                message.copy(content = partial)
+                                                message.copy(
+                                                    content = partialAnswer,
+                                                    thinking = partialThinking,
+                                                )
                                             } else {
                                                 message
                                             }
@@ -610,7 +624,10 @@ private fun EngReadApp() {
                             }
                         }
                     }.ifBlank { streamedAnswer.toString() }
-                    val finalAssistantMessage = assistantMessage.copy(content = answer)
+                    val finalAssistantMessage = assistantMessage.copy(
+                        content = answer,
+                        thinking = streamedThinking.toString(),
+                    )
                     val newMessages = listOf(userMessage, finalAssistantMessage)
                     val nextSummary = runCatching {
                         OpenAiBookChat.summarize(
@@ -1840,8 +1857,13 @@ private fun ChatMessageBubble(
 ) {
     val fromUser = message.role == ChatRole.USER
     var detailsVisible by remember(message.id) { mutableStateOf(false) }
+    val hasFinalContent = message.content.isNotBlank()
+    var thinkingExpanded by remember(message.id) { mutableStateOf(!hasFinalContent) }
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
+    LaunchedEffect(message.id, hasFinalContent) {
+        if (hasFinalContent) thinkingExpanded = false
+    }
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (fromUser) Arrangement.End else Arrangement.Start,
@@ -1870,12 +1892,21 @@ private fun ChatMessageBubble(
                             fontWeight = FontWeight.Bold,
                         )
                     }
-                    MarkdownText(
-                        markdown = message.content,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        onLookupWord = onLookupWord,
-                        onOpenAnchor = onOpenAnchor,
-                    )
+                    if (!fromUser && message.thinking.isNotBlank()) {
+                        ChatThinkingProcess(
+                            text = message.thinking,
+                            expanded = thinkingExpanded,
+                            onToggle = { thinkingExpanded = !thinkingExpanded },
+                        )
+                    }
+                    if (message.content.isNotBlank()) {
+                        MarkdownText(
+                            markdown = message.content,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            onLookupWord = onLookupWord,
+                            onOpenAnchor = onOpenAnchor,
+                        )
+                    }
                 }
             }
             if (detailsVisible) {
@@ -1917,6 +1948,50 @@ private fun ChatMessageBubble(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChatThinkingProcess(
+    text: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+) {
+    Surface(
+        onClick = onToggle,
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "思考过程",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    text = if (expanded) "收起" else "展开",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                )
+            }
+            if (expanded) {
+                Text(
+                    text = text.trim(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f),
+                )
             }
         }
     }

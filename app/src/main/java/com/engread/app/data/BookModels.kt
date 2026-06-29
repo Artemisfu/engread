@@ -118,6 +118,7 @@ data class ChatMessage(
     val id: String,
     val role: ChatRole,
     val content: String,
+    val thinking: String = "",
     val createdAt: Long,
 )
 
