@@ -1802,27 +1802,37 @@ private fun BookChatSelector(
                 }
             }
         }
-        IconButton(
-            onClick = onContinueRead,
-            enabled = selectedBook != null,
-            modifier = Modifier.size(40.dp),
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(
-                Icons.AutoMirrored.Filled.ArrowBack,
-                contentDescription = "继续读",
-                tint = if (selectedBook != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        IconButton(
-            onClick = onClearChat,
-            enabled = clearChatEnabled,
-            modifier = Modifier.size(40.dp),
-        ) {
-            Icon(
-                Icons.Filled.Delete,
-                contentDescription = "清空对话",
-                tint = if (clearChatEnabled) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f),
-            )
+            IconButton(
+                onClick = onContinueRead,
+                enabled = selectedBook != null,
+                modifier = Modifier.size(40.dp),
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "继续读",
+                    tint = if (selectedBook != null) {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+                    },
+                    modifier = Modifier.offset(x = 2.dp),
+                )
+            }
+            IconButton(
+                onClick = onClearChat,
+                enabled = clearChatEnabled,
+                modifier = Modifier.size(40.dp),
+            ) {
+                Icon(
+                    Icons.Filled.Delete,
+                    contentDescription = "清空对话",
+                    tint = if (clearChatEnabled) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f),
+                )
+            }
         }
     }
 }
