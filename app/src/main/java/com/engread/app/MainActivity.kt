@@ -688,8 +688,7 @@ private fun EngReadApp() {
                 repository.addNote(
                     book = book,
                     paragraphIndex = book.lastReadParagraph,
-                    sentence = userMessage.content.chatQuotedParagraphForNote()
-                        ?: book.paragraphs.getOrNull(book.lastReadParagraph).orEmpty(),
+                    sentence = userMessage.content.chatQuotedParagraphForNote().orEmpty(),
                     translationText = answer,
                     noteText = question,
                     noteType = ReaderNoteType.CHAT,
@@ -6081,8 +6080,10 @@ private fun NoteCard(
                             modifier = Modifier.weight(1f),
                         )
                         if (!batchDeleteMode) {
-                            IconButton(onClick = onOpenSource) {
-                                Icon(Icons.Filled.AutoStories, contentDescription = "回原文")
+                            if (!isChatNote) {
+                                IconButton(onClick = onOpenSource) {
+                                    Icon(Icons.Filled.AutoStories, contentDescription = "回原文")
+                                }
                             }
                             IconButton(onClick = onEdit) {
                                 Icon(Icons.Filled.Edit, contentDescription = "编辑")
@@ -6090,19 +6091,17 @@ private fun NoteCard(
                         }
                     }
                     Text(
-                        text = "${note.bookTitle} · 第 ${note.paragraphIndex + 1} 段 · ${formatTimestamp(note.updatedAt)}",
+                        text = if (isChatNote) {
+                            "${note.bookTitle} · ${formatTimestamp(note.updatedAt)}"
+                        } else {
+                            "${note.bookTitle} · 第 ${note.paragraphIndex + 1} 段 · ${formatTimestamp(note.updatedAt)}"
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                     if (isChatNote) {
-                        NotePlainSection(
-                            title = "原文",
-                            text = if (showDetails) note.sentence else note.sentence.compactText(96),
-                            emphasized = true,
-                            maxLines = if (showDetails) Int.MAX_VALUE else 3,
-                        )
                         if (!showEnglishOnly && note.noteText.isNotBlank()) {
                             if (showDetails) {
                                 NoteMarkdownSection(title = "提问", markdown = note.noteText)
@@ -6343,11 +6342,13 @@ private fun EditNoteDialog(
         title = { Text("编辑笔记") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(
-                    text = note.sentence,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                if (note.noteType != ReaderNoteType.CHAT && note.sentence.isNotBlank()) {
+                    Text(
+                        text = note.sentence,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 if (note.translationText.isNotBlank()) {
                     Text(
                         text = note.translationText,

@@ -332,7 +332,6 @@ class LibraryRepository(
                 bookNotes.sortedByDescending { it.updatedAt }.forEach { note ->
                     if (note.isChatNoteForStorage()) {
                         appendLine("- 类型：对话")
-                        appendLine("  原文：${note.sentence}")
                         val question = note.chatQuestionForStorage()
                         if (question.isNotBlank()) {
                             appendLine("  提问：$question")
