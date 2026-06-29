@@ -659,6 +659,41 @@ private fun EngReadApp() {
         }
     }
 
+    fun addChatTurnToNotes(book: Book, userMessage: ChatMessage, assistantMessage: ChatMessage) {
+        val question = userMessage.content.chatQuestionForNote()
+        val answer = assistantMessage.content.trim()
+        if (question.isBlank() || answer.isBlank()) {
+            showMessage("这一轮对话还不完整")
+            return
+        }
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                repository.addNote(
+                    book = book,
+                    paragraphIndex = book.lastReadParagraph,
+                    sentence = userMessage.content.chatQuotedParagraphForNote()
+                        ?: book.paragraphs.getOrNull(book.lastReadParagraph).orEmpty(),
+                    translationText = answer,
+                    noteText = question,
+                    noteType = ReaderNoteType.CHAT,
+                )
+            }
+            refreshAll()
+            showMessage("已加入笔记")
+        }
+    }
+
+    fun clearBookChat(book: Book) {
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                repository.clearBookChat(book.id)
+            }
+            chatSuggestionsByBook = chatSuggestionsByBook - book.id
+            refreshAll()
+            showMessage("已清空《${book.title}》对话")
+        }
+    }
+
     EngReadTheme(readerTheme = settings.theme) {
         Box(modifier = Modifier.fillMaxSize()) {
             when (val current = screen) {
@@ -877,6 +912,10 @@ private fun EngReadApp() {
                     onSendMessage = { book, text -> sendBookChatMessage(book, text) },
                     onRefreshSuggestions = { book, prioritizeLastAssistantQuestion ->
                         requestChatSuggestions(book, prioritizeLastAssistantQuestion)
+                    },
+                    onClearChat = { book -> clearBookChat(book) },
+                    onAddChatNote = { book, userMessage, assistantMessage ->
+                        addChatTurnToNotes(book, userMessage, assistantMessage)
                     },
                     onOpenReader = { book, paragraphIndex -> openReader(book, paragraphIndex) },
                     onAddLookupHistory = { activeBook, paragraphIndex, type, sourceText, resultText, phonetic ->
@@ -1274,6 +1313,8 @@ private fun ChatScreen(
     bottomBar: @Composable () -> Unit,
     onSendMessage: (Book, String) -> Unit,
     onRefreshSuggestions: (Book, Boolean) -> Unit,
+    onClearChat: (Book) -> Unit,
+    onAddChatNote: (Book, ChatMessage, ChatMessage) -> Unit,
     onOpenReader: (Book, Int?) -> Unit,
     onAddLookupHistory: (Book, Int, LookupHistoryType, String, String, String) -> Unit,
 ) {
@@ -1314,7 +1355,9 @@ private fun ChatScreen(
     var wordStack by remember(selectedBookId) { mutableStateOf<List<WordEntry>>(emptyList()) }
     var wordLookupSerial by remember(selectedBookId) { mutableStateOf(0) }
     var ttsAccent by rememberSaveable { mutableStateOf(TtsAccent.US) }
+    var clearChatConfirmOpen by remember { mutableStateOf(false) }
     val showLatestButton = selectedBook != null && messages.isNotEmpty() && listState.canScrollForward
+    val canClearChat = selectedChat?.let { it.messages.isNotEmpty() || it.summary.isNotBlank() } == true
 
     fun refreshLocalSuggestions() {
         if (localSuggestionsLoading) return
@@ -1503,6 +1546,8 @@ private fun ChatScreen(
                         onContinueRead = {
                             selectedBook?.let { book -> onOpenReader(book, null) }
                         },
+                        onClearChat = { clearChatConfirmOpen = true },
+                        clearChatEnabled = canClearChat,
                     )
                     LazyColumn(
                         state = listState,
@@ -1523,6 +1568,11 @@ private fun ChatScreen(
                                 onLookupWord = { lookupChatWord(it) },
                                 onOpenAnchor = { paragraphIndex ->
                                     selectedBook?.let { onOpenReader(it, paragraphIndex) }
+                                },
+                                onAddNote = selectedBook?.let { book ->
+                                    messages.chatTurnForMessage(message)?.let { turn ->
+                                        { onAddChatNote(book, turn.userMessage, turn.assistantMessage) }
+                                    }
                                 },
                             )
                         }
@@ -1579,6 +1629,31 @@ private fun ChatScreen(
             }
         }
     }
+    if (clearChatConfirmOpen) {
+        AlertDialog(
+            onDismissRequest = { clearChatConfirmOpen = false },
+            icon = { Icon(Icons.Filled.Delete, contentDescription = null) },
+            title = { Text("清空这本书的对话？") },
+            text = { Text("会删除当前书籍的所有对话历史和摘要，不影响书籍、笔记和查词记录。") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val book = selectedBook
+                        clearChatConfirmOpen = false
+                        if (book != null) onClearChat(book)
+                    },
+                    shape = RoundedCornerShape(8.dp),
+                ) {
+                    Text("清空")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { clearChatConfirmOpen = false }) {
+                    Text("取消")
+                }
+            },
+        )
+    }
 }
 @Composable
 private fun BookChatSelector(
@@ -1587,6 +1662,8 @@ private fun BookChatSelector(
     bookChats: List<BookChat>,
     onSelect: (Book) -> Unit,
     onContinueRead: () -> Unit,
+    onClearChat: () -> Unit,
+    clearChatEnabled: Boolean,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     Row(
@@ -1640,6 +1717,17 @@ private fun BookChatSelector(
                 Icons.AutoMirrored.Filled.ArrowBack,
                 contentDescription = "继续读",
                 tint = if (selectedBook != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        IconButton(
+            onClick = onClearChat,
+            enabled = clearChatEnabled,
+            modifier = Modifier.size(40.dp),
+        ) {
+            Icon(
+                Icons.Filled.Delete,
+                contentDescription = "清空对话",
+                tint = if (clearChatEnabled) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f),
             )
         }
     }
@@ -1748,6 +1836,7 @@ private fun ChatMessageBubble(
     message: ChatMessage,
     onLookupWord: (String) -> Unit,
     onOpenAnchor: (Int) -> Unit,
+    onAddNote: (() -> Unit)?,
 ) {
     val fromUser = message.role == ChatRole.USER
     var detailsVisible by remember(message.id) { mutableStateOf(false) }
@@ -1814,10 +1903,74 @@ private fun ChatMessageBubble(
                             modifier = Modifier.size(16.dp),
                         )
                     }
+                    if (onAddNote != null) {
+                        IconButton(
+                            onClick = onAddNote,
+                            modifier = Modifier.size(30.dp),
+                        ) {
+                            Icon(
+                                Icons.Filled.BookmarkAdd,
+                                contentDescription = "加入笔记",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                                modifier = Modifier.size(16.dp),
+                            )
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+private data class ChatTurnForNote(
+    val userMessage: ChatMessage,
+    val assistantMessage: ChatMessage,
+)
+
+private fun List<ChatMessage>.chatTurnForMessage(message: ChatMessage): ChatTurnForNote? {
+    val index = indexOfFirst { it.id == message.id }
+    if (index < 0) return null
+    val turn = when (message.role) {
+        ChatRole.USER -> {
+            val assistant = drop(index + 1)
+                .takeWhile { it.role != ChatRole.USER }
+                .firstOrNull { it.role == ChatRole.ASSISTANT }
+            assistant?.let { ChatTurnForNote(message, it) }
+        }
+
+        ChatRole.ASSISTANT -> {
+            val user = asSequence()
+                .take(index)
+                .toList()
+                .asReversed()
+                .firstOrNull { it.role == ChatRole.USER }
+            user?.let { ChatTurnForNote(it, message) }
+        }
+    }
+    return turn?.takeIf {
+        it.userMessage.content.trim().isNotBlank() &&
+            it.assistantMessage.content.trim().isNotBlank()
+    }
+}
+
+private fun String.chatQuestionForNote(): String =
+    substringAfter("我的问题：", missingDelimiterValue = "")
+        .trim()
+        .ifBlank { trim() }
+
+private fun String.chatQuotedParagraphForNote(): String? {
+    if (!contains("针对这段原文：")) return null
+    val quoteLines = substringAfter("针对这段原文：")
+        .lineSequence()
+        .dropWhile { it.isBlank() }
+        .takeWhile { line ->
+            val trimmed = line.trimStart()
+            trimmed.startsWith(">") || trimmed.isBlank()
+        }
+        .filter { it.trimStart().startsWith(">") }
+        .map { it.trimStart().removePrefix(">").trimStart() }
+        .toList()
+    return quoteLines.joinToString("\n").trim().takeIf { it.isNotBlank() }
 }
 
 private fun formatChatMessageTime(timestamp: Long): String {

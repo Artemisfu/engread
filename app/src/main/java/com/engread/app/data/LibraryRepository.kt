@@ -298,6 +298,11 @@ class LibraryRepository(
     }
 
     @Synchronized
+    fun clearBookChat(bookId: String) {
+        saveBookChats(getBookChats().filterNot { it.bookId == bookId })
+    }
+
+    @Synchronized
     fun addReadingTime(bookId: String, durationMillis: Long) {
         if (durationMillis <= 0L) return
         saveBooks(
