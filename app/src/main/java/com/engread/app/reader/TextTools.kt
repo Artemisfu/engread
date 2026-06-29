@@ -82,6 +82,22 @@ private val BookChatFinalAnswerMarkerVariants = listOf(
     "<ENGREAD_FINAL_ANSWER />",
 )
 private val BookChatFinalAnswerTagRegex = Regex("</?ENGREAD_FINAL_ANSWER\\s*/?>", RegexOption.IGNORE_CASE)
+private val BookChatXmlToolCallsRegex = Regex(
+    "<tool_calls?[^>]*>.*?</tool_calls?>",
+    setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
+)
+private val BookChatDsmlToolCallsRegex = Regex(
+    "<｜｜DSML｜｜tool_calls>.*?</｜｜DSML｜｜tool_calls>",
+    setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
+)
+private val BookChatDsmlInvokeRegex = Regex(
+    "<｜｜DSML｜｜invoke\\s+name=\"([^\"]+)\"[^>]*>(.*?)</｜｜DSML｜｜invoke>",
+    setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
+)
+private val BookChatDsmlParameterRegex = Regex(
+    "<｜｜DSML｜｜parameter\\s+name=\"([^\"]+)\"[^>]*>(.*?)</｜｜DSML｜｜parameter>",
+    setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
+)
 
 fun buildReaderPages(
     paragraphs: List<String>,
@@ -1383,9 +1399,17 @@ private fun CharSequence.longestSuffixThatPrefixesAny(prefixes: List<String>): I
 
 private fun String.removeBookChatFinalMarkers(): String =
     replace(BookChatFinalAnswerTagRegex, "")
+        .removeBookChatInternalToolMarkup()
 
 private fun String.stripBookChatFinalMarker(): String =
     removeBookChatFinalMarkers().trim()
+
+private fun String.removeBookChatInternalToolMarkup(): String =
+    replace(BookChatDsmlToolCallsRegex, "")
+        .replace(BookChatXmlToolCallsRegex, "")
+
+fun sanitizeBookChatVisibleText(text: String): String =
+    text.removeBookChatFinalMarkers().trim()
 
 private fun String.extractCompatBookToolCalls(): JSONArray? {
     val trimmed = trim()
@@ -1394,6 +1418,7 @@ private fun String.extractCompatBookToolCalls(): JSONArray? {
         .removeSuffix("```")
         .trim()
     if (trimmed.isBlank()) return null
+    trimmed.extractDsmlBookToolCalls()?.takeIf { it.length() > 0 }?.let { return it }
     val candidates = buildList {
         Regex("<tool_calls?[^>]*>(.*?)</tool_calls?>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
             .findAll(trimmed)
@@ -1423,6 +1448,48 @@ private fun String.extractCompatBookToolCalls(): JSONArray? {
     }
     return null
 }
+
+private fun String.extractDsmlBookToolCalls(): JSONArray? {
+    val dsmlBlocks = BookChatDsmlToolCallsRegex.findAll(this).toList()
+    if (dsmlBlocks.isEmpty()) return null
+    val calls = JSONArray()
+    dsmlBlocks.forEach { block ->
+        BookChatDsmlInvokeRegex.findAll(block.value).forEach { invoke ->
+            val name = invoke.groupValues.getOrElse(1) { "" }.trim()
+            if (name !in BookChatToolNames) return@forEach
+            val body = invoke.groupValues.getOrElse(2) { "" }
+            val arguments = JSONObject()
+            BookChatDsmlParameterRegex.findAll(body).forEach { parameter ->
+                val parameterName = parameter.groupValues.getOrElse(1) { "" }.trim()
+                val rawValue = parameter.groupValues.getOrElse(2) { "" }.trim()
+                if (parameterName.isNotBlank()) {
+                    arguments.put(parameterName, rawValue.toDsmlParameterValue())
+                }
+            }
+            calls.put(
+                JSONObject()
+                    .put("id", "engread_dsml_tool_call_${calls.length()}")
+                    .put("type", "function")
+                    .put(
+                        "function",
+                        JSONObject()
+                            .put("name", name)
+                            .put("arguments", arguments.toString()),
+                    ),
+            )
+        }
+    }
+    return calls.takeIf { it.length() > 0 }
+}
+
+private fun String.toDsmlParameterValue(): Any =
+    when {
+        equals("true", ignoreCase = true) -> true
+        equals("false", ignoreCase = true) -> false
+        toIntOrNull() != null -> toInt()
+        toDoubleOrNull() != null -> toDouble()
+        else -> this
+    }
 
 private fun JSONObject.normalizedCompatBookToolCalls(): JSONArray {
     optJSONArray("tool_calls")?.normalizedCompatBookToolCalls()?.takeIf { it.length() > 0 }?.let { return it }

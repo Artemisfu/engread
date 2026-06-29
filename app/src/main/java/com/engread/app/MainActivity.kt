@@ -191,6 +191,7 @@ import com.engread.app.reader.buildReaderPages
 import com.engread.app.reader.chapterDropInitialOffsets
 import com.engread.app.reader.extractWordAt
 import com.engread.app.reader.formatTimestamp
+import com.engread.app.reader.sanitizeBookChatVisibleText
 import com.engread.app.ui.EngReadTheme
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.Lifecycle
@@ -658,8 +659,8 @@ private fun EngReadApp() {
                                 streamedAnswer.append(chunk.text)
                             }
                         }
-                        val partialAnswer = streamedAnswer.toString()
-                        val partialThinking = streamedThinking.toString()
+                        val partialAnswer = sanitizeBookChatVisibleText(streamedAnswer.toString())
+                        val partialThinking = sanitizeBookChatVisibleText(streamedThinking.toString())
                         withContext(Dispatchers.Main) {
                             bookChats = bookChats.map { chat ->
                                 if (chat.bookId == book.id) {
@@ -682,8 +683,8 @@ private fun EngReadApp() {
                         }
                     }.ifBlank { streamedAnswer.toString() }
                     val finalAssistantMessage = assistantMessage.copy(
-                        content = answer,
-                        thinking = streamedThinking.toString(),
+                        content = sanitizeBookChatVisibleText(answer),
+                        thinking = sanitizeBookChatVisibleText(streamedThinking.toString()),
                     )
                     val newMessages = listOf(userMessage, finalAssistantMessage)
                     val nextSummary = runCatching {
@@ -1996,7 +1997,9 @@ private fun ChatMessageBubble(
 ) {
     val fromUser = message.role == ChatRole.USER
     var detailsVisible by remember(message.id) { mutableStateOf(false) }
-    val hasFinalContent = message.content.isNotBlank()
+    val visibleContent = remember(message.content) { sanitizeBookChatVisibleText(message.content) }
+    val visibleThinking = remember(message.thinking) { sanitizeBookChatVisibleText(message.thinking) }
+    val hasFinalContent = visibleContent.isNotBlank()
     var thinkingExpanded by remember(message.id) { mutableStateOf(!hasFinalContent) }
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
@@ -2023,7 +2026,7 @@ private fun ChatMessageBubble(
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    if (!fromUser && streaming && !hasFinalContent && message.thinking.isBlank()) {
+                    if (!fromUser && streaming && !hasFinalContent && visibleThinking.isBlank()) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -2036,16 +2039,16 @@ private fun ChatMessageBubble(
                             )
                         }
                     }
-                    if (!fromUser && message.thinking.isNotBlank()) {
+                    if (!fromUser && visibleThinking.isNotBlank()) {
                         ChatThinkingProcess(
-                            text = message.thinking,
+                            text = visibleThinking,
                             expanded = thinkingExpanded,
                             onToggle = { thinkingExpanded = !thinkingExpanded },
                         )
                     }
-                    if (message.content.isNotBlank()) {
+                    if (visibleContent.isNotBlank()) {
                         MarkdownText(
-                            markdown = message.content,
+                            markdown = visibleContent,
                             color = MaterialTheme.colorScheme.onSurface,
                             onLookupWord = onLookupWord,
                             onOpenAnchor = onOpenAnchor,
@@ -2066,7 +2069,7 @@ private fun ChatMessageBubble(
                     )
                     IconButton(
                         onClick = {
-                            clipboard.setText(AnnotatedString(message.content))
+                            clipboard.setText(AnnotatedString(visibleContent))
                             Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
                         },
                         modifier = Modifier.size(30.dp),
