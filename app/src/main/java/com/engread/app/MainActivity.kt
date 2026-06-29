@@ -662,6 +662,13 @@ private fun EngReadApp() {
                             refreshAll()
                             screen = AppScreen.Notes
                         },
+                        onOpenChat = {
+                            book?.let { activeBook ->
+                                preferredChatBookId = activeBook.id
+                                refreshAll()
+                                screen = AppScreen.Chat
+                            }
+                        },
                         onSettingsChange = { next ->
                             settings = next
                             scope.launch(Dispatchers.IO) { repository.saveSettings(next) }
@@ -1381,34 +1388,6 @@ private fun ChatScreen(
         },
         bottomBar = {
             Column {
-                if (showLatestButton && wordStack.isEmpty()) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp),
-                        horizontalArrangement = Arrangement.End,
-                    ) {
-                        Surface(
-                            shape = RoundedCornerShape(999.dp),
-                            color = MaterialTheme.colorScheme.inverseSurface,
-                            modifier = Modifier
-                                .heightIn(min = 22.dp)
-                                .clickable {
-                                    scope.launch {
-                                        val target = listState.layoutInfo.totalItemsCount - 1
-                                        if (target >= 0) listState.scrollToItem(target)
-                                    }
-                                },
-                        ) {
-                            Text(
-                                text = "看最新",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.inverseOnSurface,
-                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 2.dp),
-                            )
-                        }
-                    }
-                }
                 wordStack.lastOrNull()?.let { entry ->
                     WordLookupPanel(
                         entry = entry,
@@ -1440,67 +1419,94 @@ private fun ChatScreen(
         if (books.isEmpty()) {
             EmptyChat(modifier = Modifier.padding(padding).fillMaxSize())
         } else {
-            Column(
+            Box(
                 modifier = Modifier
                     .padding(padding)
                     .fillMaxSize()
                     .background(MaterialTheme.colorScheme.background),
             ) {
-                BookChatSelector(
-                    books = books,
-                    selectedBook = selectedBook,
-                    bookChats = bookChats,
-                    onSelect = { selectedBookId = it.id },
-                    onContinueRead = {
-                        selectedBook?.let { book -> onOpenReader(book, null) }
-                    },
-                )
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                Column(
+                    modifier = Modifier.fillMaxSize(),
                 ) {
-                    if (messages.isEmpty()) {
-                        item {
-                            EmptyChatPrompt()
+                    BookChatSelector(
+                        books = books,
+                        selectedBook = selectedBook,
+                        bookChats = bookChats,
+                        onSelect = { selectedBookId = it.id },
+                        onContinueRead = {
+                            selectedBook?.let { book -> onOpenReader(book, null) }
+                        },
+                    )
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        if (messages.isEmpty()) {
+                            item {
+                                EmptyChatPrompt()
+                            }
                         }
-                    }
-                    itemsIndexed(messages, key = { _, message -> message.id }) { _, message ->
-                        ChatMessageBubble(
-                            message = message,
-                            onLookupWord = { lookupChatWord(it) },
-                            onOpenAnchor = { paragraphIndex ->
-                                selectedBook?.let { onOpenReader(it, paragraphIndex) }
-                            },
-                        )
-                    }
-                    if (isSending) {
-                        item {
-                            ChatThinkingBubble()
-                        }
-                    }
-                    if (!isSending) {
-                        item {
-                            ChatSuggestionsPanel(
-                                questions = visibleSuggestions,
-                                loading = suggestionsAreLoading,
-                                onQuestionClick = { question ->
-                                    val book = selectedBook ?: return@ChatSuggestionsPanel
-                                    onSendMessage(book, question)
+                        itemsIndexed(messages, key = { _, message -> message.id }) { _, message ->
+                            ChatMessageBubble(
+                                message = message,
+                                onLookupWord = { lookupChatWord(it) },
+                                onOpenAnchor = { paragraphIndex ->
+                                    selectedBook?.let { onOpenReader(it, paragraphIndex) }
                                 },
-                                onRefresh = {
-                                    val book = selectedBook ?: return@ChatSuggestionsPanel
-                                    if (!settings.translation.isConfigured) {
-                                        refreshLocalSuggestions()
-                                    } else {
-                                        onRefreshSuggestions(book)
-                                    }
-                                }
                             )
                         }
+                        if (isSending) {
+                            item {
+                                ChatThinkingBubble()
+                            }
+                        }
+                        if (!isSending) {
+                            item {
+                                ChatSuggestionsPanel(
+                                    questions = visibleSuggestions,
+                                    loading = suggestionsAreLoading,
+                                    onQuestionClick = { question ->
+                                        val book = selectedBook ?: return@ChatSuggestionsPanel
+                                        onSendMessage(book, question)
+                                    },
+                                    onRefresh = {
+                                        val book = selectedBook ?: return@ChatSuggestionsPanel
+                                        if (!settings.translation.isConfigured) {
+                                            refreshLocalSuggestions()
+                                        } else {
+                                            onRefreshSuggestions(book)
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+                if (showLatestButton && wordStack.isEmpty()) {
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = Color.Black,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(end = 12.dp, bottom = 6.dp)
+                            .heightIn(min = 22.dp)
+                            .clickable {
+                                scope.launch {
+                                    val target = listState.layoutInfo.totalItemsCount - 1
+                                    if (target >= 0) listState.scrollToItem(target)
+                                }
+                            },
+                    ) {
+                        Text(
+                            text = "看最新",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White,
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 2.dp),
+                        )
                     }
                 }
             }
@@ -2590,6 +2596,7 @@ private fun ReaderScreen(
     modifier: Modifier = Modifier,
     onBack: () -> Unit,
     onOpenNotes: () -> Unit,
+    onOpenChat: () -> Unit,
     onSettingsChange: (ReaderSettings) -> Unit,
     onProgress: (Int) -> Unit,
     onAddNote: (paragraphIndex: Int, sentence: String, translationText: String, noteText: String) -> Unit,
@@ -3141,6 +3148,7 @@ private fun ReaderScreen(
                 onNextPage = { goNextPage() },
                 onBack = onBack,
                 onOpenToc = { tocOpen = true },
+                onOpenChat = onOpenChat,
                 onOpenPageSettings = { pageSettingsOpen = true },
                 onWordLongPress = { word, paragraphIndex, wordRange ->
                     selectionStart = null
@@ -3318,6 +3326,7 @@ private fun ReaderPageSurface(
     onNextPage: () -> Unit,
     onBack: () -> Unit,
     onOpenToc: () -> Unit,
+    onOpenChat: () -> Unit,
     onOpenPageSettings: () -> Unit,
     onWordLongPress: (String, Int, IntRange?) -> Unit,
     onSelectionChange: (Int, Int) -> Unit,
@@ -3455,6 +3464,7 @@ private fun ReaderPageSurface(
             ReaderTopControls(
                 title = bookTitle,
                 onBack = onBack,
+                onOpenChat = onOpenChat,
                 onOpenToc = onOpenToc,
                 onOpenPageSettings = onOpenPageSettings,
                 onHideControls = { hideControls() },
@@ -3852,6 +3862,7 @@ private fun ReaderCornerMeta(
 private fun ReaderTopControls(
     title: String,
     onBack: () -> Unit,
+    onOpenChat: () -> Unit,
     onOpenToc: () -> Unit,
     onOpenPageSettings: () -> Unit,
     onHideControls: () -> Unit,
@@ -3885,6 +3896,9 @@ private fun ReaderTopControls(
                         )
                     },
             )
+            IconButton(onClick = onOpenChat) {
+                Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = "对话")
+            }
             IconButton(onClick = onOpenToc) {
                 Icon(Icons.Filled.AutoStories, contentDescription = "目录")
             }
