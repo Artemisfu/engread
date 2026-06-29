@@ -649,7 +649,6 @@ private fun EngReadApp() {
                             BookChatStreamChunkType.FINAL_REPLACE -> {
                                 streamedAnswer.clear()
                                 streamedAnswer.append(chunk.text)
-                                if (streamedThinking.isNotBlank()) streamedThinking.clear()
                             }
                         }
                         val partialAnswer = streamedAnswer.toString()

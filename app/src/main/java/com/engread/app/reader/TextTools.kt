@@ -72,6 +72,7 @@ data class BookChatStreamChunk(
 )
 
 private const val BookChatFinalAnswerMarker = "<ENGREAD_FINAL_ANSWER>"
+private const val BookChatMaxToolRounds = 4
 private val BookChatFinalAnswerMarkerVariants = listOf(
     BookChatFinalAnswerMarker,
     "</ENGREAD_FINAL_ANSWER>",
@@ -635,16 +636,18 @@ private fun TranslationSettings.createBookToolLoopCompletion(book: Book, userPro
     val messages = bookChatMessages(userPrompt)
     val tools = book.bookChatToolDefinitions()
     var lastContent = ""
-    repeat(4) {
+    repeat(BookChatMaxToolRounds + 1) { round ->
+        val remainingToolRounds = (BookChatMaxToolRounds - round).coerceAtLeast(0)
+        val toolsForRound = tools.takeIf { remainingToolRounds > 0 }
         val message = createChatCompletionMessage(
-            messages = messages,
+            messages = messages.withBookChatRoundInstruction(remainingToolRounds),
             temperature = 0.35,
-            tools = tools,
+            tools = toolsForRound,
         )
         lastContent = message.optActualString("content").trim()
         val toolCalls = message.optJSONArray("tool_calls")
         if (toolCalls == null || toolCalls.length() == 0) {
-            return lastContent.takeIf { it.isNotBlank() } ?: error("服务没有返回可用内容。")
+            return lastContent.stripBookChatFinalMarker().takeIf { it.isNotBlank() } ?: error("服务没有返回可用内容。")
         }
         messages.put(message)
         for (index in 0 until toolCalls.length()) {
@@ -662,7 +665,7 @@ private fun TranslationSettings.createBookToolLoopCompletion(book: Book, userPro
             )
         }
     }
-    return lastContent.takeIf { it.isNotBlank() } ?: error("工具调用没有产生最终回复。")
+    return lastContent.stripBookChatFinalMarker().takeIf { it.isNotBlank() } ?: error("工具调用没有产生最终回复。")
 }
 
 private suspend fun TranslationSettings.createBookToolLoopCompletionStreaming(
@@ -674,11 +677,13 @@ private suspend fun TranslationSettings.createBookToolLoopCompletionStreaming(
     val tools = book.bookChatToolDefinitions()
     val finalMarkerParser = BookChatFinalMarkerParser()
     var lastContent = ""
-    repeat(4) {
+    repeat(BookChatMaxToolRounds + 1) { round ->
+        val remainingToolRounds = (BookChatMaxToolRounds - round).coerceAtLeast(0)
+        val toolsForRound = tools.takeIf { remainingToolRounds > 0 }
         val message = createChatCompletionMessageStream(
-            messages = messages,
+            messages = messages.withBookChatRoundInstruction(remainingToolRounds),
             temperature = 0.35,
-            tools = tools,
+            tools = toolsForRound,
             onTextDelta = { delta ->
                 finalMarkerParser.accept(delta, onChunk)
             },
@@ -724,6 +729,29 @@ private suspend fun TranslationSettings.createBookToolLoopCompletionStreaming(
         ?: lastContent.stripBookChatFinalMarker().takeIf { it.isNotBlank() }
         ?: error("工具调用没有产生最终回复。")
 }
+
+private fun JSONArray.withBookChatRoundInstruction(remainingToolRounds: Int): JSONArray =
+    JSONArray().also { copy ->
+        for (index in 0 until length()) {
+            copy.put(get(index))
+        }
+        copy.put(
+            JSONObject()
+                .put("role", "system")
+                .put(
+                    "content",
+                    if (remainingToolRounds > 0) {
+                        "Tool-call budget notice: you have $remainingToolRounds tool-call round(s) remaining including this assistant turn. " +
+                            "如果本轮继续调用工具，本轮结束后还剩 ${remainingToolRounds - 1} 次工具调用机会。 " +
+                            "如果信息已经足够，必须停止调用工具，并立即输出 $BookChatFinalAnswerMarker 加最终正文。 " +
+                            "不要只输出进度说明就结束。"
+                    } else {
+                        "Tool-call budget notice: no tool-call rounds remain. Do not call tools. " +
+                            "你现在必须输出 $BookChatFinalAnswerMarker 加最终正文；如果信息不完整，也要基于已有资料回答并说明限制。"
+                    },
+                ),
+        )
+    }
 
 private fun Book.bookChatToolDefinitions(): JSONArray =
     JSONArray()
