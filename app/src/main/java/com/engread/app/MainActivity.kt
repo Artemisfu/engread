@@ -1451,8 +1451,36 @@ private fun ChatScreen(
     var wordLookupSerial by remember(selectedBookId) { mutableStateOf(0) }
     var ttsAccent by rememberSaveable { mutableStateOf(TtsAccent.US) }
     var clearChatConfirmOpen by remember { mutableStateOf(false) }
+    var autoFollowLatest by remember(selectedBookId) { mutableStateOf(false) }
+    val latestMessage = messages.lastOrNull()
+    val latestStreamLength = latestMessage?.let { it.content.length + it.thinking.length } ?: 0
     val showLatestButton = selectedBook != null && messages.isNotEmpty() && listState.canScrollForward
     val canClearChat = selectedChat?.let { it.messages.isNotEmpty() || it.summary.isNotBlank() } == true
+
+    LaunchedEffect(listState.isScrollInProgress, listState.canScrollForward) {
+        if (!listState.canScrollForward) {
+            autoFollowLatest = true
+        } else if (listState.isScrollInProgress) {
+            autoFollowLatest = false
+        }
+    }
+
+    LaunchedEffect(selectedBookId, isSending, latestMessage?.id, latestStreamLength, messages.size) {
+        val message = latestMessage ?: return@LaunchedEffect
+        if (!isSending) return@LaunchedEffect
+        val shouldFollow = autoFollowLatest || message.role == ChatRole.USER || !listState.canScrollForward
+        if (!shouldFollow) return@LaunchedEffect
+        autoFollowLatest = true
+        val target = listState.layoutInfo.totalItemsCount - 1
+        if (target >= 0) {
+            listState.scrollToItem(target)
+            delay(16)
+            val adjustedTarget = listState.layoutInfo.totalItemsCount - 1
+            if (adjustedTarget >= 0) {
+                listState.scrollToItem(adjustedTarget)
+            }
+        }
+    }
 
     fun refreshLocalSuggestions() {
         if (localSuggestionsLoading) return
@@ -1694,6 +1722,9 @@ private fun ChatScreen(
                                 )
                             }
                         }
+                        item(key = "chat-bottom-anchor") {
+                            Spacer(Modifier.height(1.dp))
+                        }
                     }
                 }
                 if (showLatestButton && wordStack.isEmpty()) {
@@ -1706,6 +1737,7 @@ private fun ChatScreen(
                             .heightIn(min = 22.dp)
                             .clickable {
                                 scope.launch {
+                                    autoFollowLatest = true
                                     val target = listState.layoutInfo.totalItemsCount - 1
                                     if (target >= 0) listState.scrollToItem(target)
                                 }
