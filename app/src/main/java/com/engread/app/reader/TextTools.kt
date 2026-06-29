@@ -434,11 +434,35 @@ object OpenAiBookChat {
             }
         }
 
+    suspend fun replyStreaming(
+        book: Book,
+        summary: String,
+        recentMessages: List<ChatMessage>,
+        settings: TranslationSettings,
+        onDelta: suspend (String) -> Unit,
+    ): String =
+        withContext(Dispatchers.IO) {
+            if (!settings.isConfigured) {
+                error("请先在设置里填写 Base URL、API Key 和模型。")
+            }
+            val currentUserMessage = recentMessages.lastOrNull { it.role == ChatRole.USER }?.content.orEmpty()
+            val latestFragments = recentMessages.dropLast(1).takeLast(10).toPromptTranscript().ifBlank { "暂无。" }
+            val userPrompt = buildBookChatPrompt(book, summary, latestFragments, currentUserMessage)
+            runCatching {
+                settings.createBookToolLoopCompletionStreaming(book, userPrompt, onDelta)
+            }.getOrElse {
+                val full = reply(book, summary, recentMessages, settings)
+                onDelta(full)
+                full
+            }
+        }
+
     suspend fun suggestQuestions(
         book: Book,
         summary: String,
         recentMessages: List<ChatMessage>,
         settings: TranslationSettings,
+        prioritizeLastAssistantQuestion: Boolean = true,
     ): List<String> =
         withContext(Dispatchers.IO) {
             if (!settings.isConfigured) {
@@ -446,10 +470,21 @@ object OpenAiBookChat {
             }
             val currentUserMessage = recentMessages.lastOrNull { it.role == ChatRole.USER }?.content.orEmpty()
             val latestFragments = recentMessages.takeLast(10).toPromptTranscript().ifBlank { "暂无。" }
+            val lastAssistantQuestion = recentMessages.lastOrNull { it.role == ChatRole.ASSISTANT }
+                ?.content
+                ?.lineSequence()
+                ?.lastOrNull { line -> line.contains("？") || line.contains("?") }
+                ?.trim()
+                .orEmpty()
             val prompt = buildBookChatPrompt(book, summary, latestFragments, currentUserMessage) +
                 "\n\n请围绕书名《${book.title}》和上面的最新阅读讨论，生成 3 个用户下一步可能想问的问题。" +
                 "提问方式请借鉴《如何阅读一本书》中的检视阅读、分析阅读和批判性阅读思路，" +
                 "但问题必须贴合这本书当前内容，不要泛泛而谈。" +
+                if (prioritizeLastAssistantQuestion && lastAssistantQuestion.isNotBlank()) {
+                    "最后一条助手回复里有这个问题：$lastAssistantQuestion。第一个猜问必须承接或回应这个问题；"
+                } else {
+                    ""
+                } +
                 "要求：只返回 JSON 字符串数组；每个问题 8 到 28 个汉字；问题要具体，能继续推进阅读理解。"
             val content = settings.createChatCompletion(
                 messages = JSONArray()
@@ -581,6 +616,45 @@ private fun TranslationSettings.createBookToolLoopCompletion(book: Book, userPro
             messages = messages,
             temperature = 0.35,
             tools = tools,
+        )
+        lastContent = message.optString("content").trim()
+        val toolCalls = message.optJSONArray("tool_calls")
+        if (toolCalls == null || toolCalls.length() == 0) {
+            return lastContent.takeIf { it.isNotBlank() } ?: error("服务没有返回可用内容。")
+        }
+        messages.put(message)
+        for (index in 0 until toolCalls.length()) {
+            val call = toolCalls.optJSONObject(index) ?: continue
+            val function = call.optJSONObject("function") ?: continue
+            val name = function.optString("name")
+            val args = function.optString("arguments").toJsonObjectOrEmpty()
+            val result = runCatching { book.executeBookTool(name, args) }
+                .getOrElse { error -> JSONObject().put("error", error.message ?: "tool failed") }
+            messages.put(
+                JSONObject()
+                    .put("role", "tool")
+                    .put("tool_call_id", call.optString("id"))
+                    .put("content", result.toString()),
+            )
+        }
+    }
+    return lastContent.takeIf { it.isNotBlank() } ?: error("工具调用没有产生最终回复。")
+}
+
+private suspend fun TranslationSettings.createBookToolLoopCompletionStreaming(
+    book: Book,
+    userPrompt: String,
+    onDelta: suspend (String) -> Unit,
+): String {
+    val messages = bookChatMessages(userPrompt)
+    val tools = book.bookChatToolDefinitions()
+    var lastContent = ""
+    repeat(4) {
+        val message = createChatCompletionMessageStream(
+            messages = messages,
+            temperature = 0.35,
+            tools = tools,
+            onDelta = onDelta,
         )
         lastContent = message.optString("content").trim()
         val toolCalls = message.optJSONArray("tool_calls")
@@ -837,6 +911,175 @@ private fun TranslationSettings.createChatCompletion(messages: JSONArray, temper
         .trim()
         .takeIf { it.isNotBlank() }
         ?: error("服务没有返回可用内容。")
+
+private data class StreamingToolCall(
+    var id: String = "",
+    var type: String = "function",
+    var name: String = "",
+    val arguments: StringBuilder = StringBuilder(),
+)
+
+private suspend fun TranslationSettings.createChatCompletionMessageStream(
+    messages: JSONArray,
+    temperature: Double,
+    tools: JSONArray? = null,
+    onDelta: suspend (String) -> Unit,
+): JSONObject {
+    val endpoint = baseUrl.toChatCompletionsEndpoint()
+    val body = JSONObject()
+        .put("model", model.trim())
+        .put("messages", messages)
+        .put("temperature", temperature)
+        .put("stream", true)
+    if (tools != null && tools.length() > 0) {
+        body.put("tools", tools)
+        body.put("tool_choice", "auto")
+    }
+
+    val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+        requestMethod = "POST"
+        connectTimeout = 20_000
+        readTimeout = 60_000
+        doOutput = true
+        setRequestProperty("Authorization", "Bearer ${apiKey.trim()}")
+        setRequestProperty("Content-Type", "application/json")
+        setRequestProperty("Accept", "text/event-stream")
+    }
+
+    try {
+        val bytes = body.toString().toByteArray(StandardCharsets.UTF_8)
+        connection.outputStream.use { output -> output.write(bytes) }
+        val responseCode = connection.responseCode
+        if (responseCode !in 200..299) {
+            val responseText = (connection.errorStream ?: connection.inputStream).bufferedReader().use { it.readText() }
+            error(responseText.toApiErrorMessage(responseCode))
+        }
+
+        val content = StringBuilder()
+        val streamedToolCalls = linkedMapOf<Int, StreamingToolCall>()
+        connection.inputStream.bufferedReader().use { reader ->
+            while (true) {
+                val rawLine = reader.readLine() ?: break
+                val line = rawLine.trim()
+                if (!line.startsWith("data:")) continue
+                val data = line.removePrefix("data:").trim()
+                if (data == "[DONE]") break
+                val delta = runCatching {
+                    JSONObject(data)
+                        .optJSONArray("choices")
+                        ?.optJSONObject(0)
+                        ?.optJSONObject("delta")
+                }.getOrNull() ?: continue
+                val textDelta = delta.optString("content").orEmpty()
+                if (textDelta.isNotEmpty()) {
+                    content.append(textDelta)
+                    onDelta(textDelta)
+                }
+                val toolCalls = delta.optJSONArray("tool_calls") ?: continue
+                for (index in 0 until toolCalls.length()) {
+                    val toolDelta = toolCalls.optJSONObject(index) ?: continue
+                    val toolIndex = toolDelta.optInt("index", index)
+                    val call = streamedToolCalls.getOrPut(toolIndex) { StreamingToolCall() }
+                    toolDelta.optString("id").takeIf { it.isNotBlank() }?.let { call.id = it }
+                    toolDelta.optString("type").takeIf { it.isNotBlank() }?.let { call.type = it }
+                    val function = toolDelta.optJSONObject("function") ?: continue
+                    function.optString("name").takeIf { it.isNotBlank() }?.let { call.name = it }
+                    function.optString("arguments").takeIf { it.isNotBlank() }?.let { call.arguments.append(it) }
+                }
+            }
+        }
+
+        val message = JSONObject()
+            .put("role", "assistant")
+            .put("content", content.toString())
+        if (streamedToolCalls.isNotEmpty()) {
+            message.put(
+                "tool_calls",
+                JSONArray().also { array ->
+                    streamedToolCalls.toSortedMap().values.forEachIndexed { index, call ->
+                        array.put(
+                            JSONObject()
+                                .put("id", call.id.ifBlank { "engread_tool_call_$index" })
+                                .put("type", call.type.ifBlank { "function" })
+                                .put(
+                                    "function",
+                                    JSONObject()
+                                        .put("name", call.name)
+                                        .put("arguments", call.arguments.toString()),
+                                ),
+                        )
+                    }
+                },
+            )
+        }
+        return message.takeIf {
+            it.optString("content").isNotBlank() ||
+                (it.optJSONArray("tool_calls")?.length() ?: 0) > 0
+        } ?: error("服务没有返回可用内容。")
+    } finally {
+        connection.disconnect()
+    }
+}
+
+private suspend fun TranslationSettings.createChatCompletionStream(
+    messages: JSONArray,
+    temperature: Double,
+    onDelta: suspend (String) -> Unit,
+): String {
+    val endpoint = baseUrl.toChatCompletionsEndpoint()
+    val body = JSONObject()
+        .put("model", model.trim())
+        .put("messages", messages)
+        .put("temperature", temperature)
+        .put("stream", true)
+
+    val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+        requestMethod = "POST"
+        connectTimeout = 20_000
+        readTimeout = 60_000
+        doOutput = true
+        setRequestProperty("Authorization", "Bearer ${apiKey.trim()}")
+        setRequestProperty("Content-Type", "application/json")
+        setRequestProperty("Accept", "text/event-stream")
+    }
+
+    try {
+        val bytes = body.toString().toByteArray(StandardCharsets.UTF_8)
+        connection.outputStream.use { output -> output.write(bytes) }
+        val responseCode = connection.responseCode
+        if (responseCode !in 200..299) {
+            val responseText = (connection.errorStream ?: connection.inputStream).bufferedReader().use { it.readText() }
+            error(responseText.toApiErrorMessage(responseCode))
+        }
+
+        val builder = StringBuilder()
+        connection.inputStream.bufferedReader().use { reader ->
+            while (true) {
+                val rawLine = reader.readLine() ?: break
+                val line = rawLine.trim()
+                if (!line.startsWith("data:")) continue
+                val data = line.removePrefix("data:").trim()
+                if (data == "[DONE]") break
+                val delta = runCatching {
+                    JSONObject(data)
+                        .optJSONArray("choices")
+                        ?.optJSONObject(0)
+                        ?.optJSONObject("delta")
+                        ?.optString("content")
+                        .orEmpty()
+                }.getOrDefault("")
+                if (delta.isNotEmpty()) {
+                    builder.append(delta)
+                    onDelta(delta)
+                }
+            }
+        }
+        return builder.toString().trim().takeIf { it.isNotBlank() }
+            ?: error("服务没有返回可用内容。")
+    } finally {
+        connection.disconnect()
+    }
+}
 
 private fun TranslationSettings.createChatCompletionMessage(
     messages: JSONArray,

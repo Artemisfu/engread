@@ -186,6 +186,9 @@ import com.engread.app.reader.chapterDropInitialOffsets
 import com.engread.app.reader.extractWordAt
 import com.engread.app.reader.formatTimestamp
 import com.engread.app.ui.EngReadTheme
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -481,7 +484,7 @@ private fun EngReadApp() {
         }
     }
 
-    fun requestChatSuggestions(book: Book) {
+    fun requestChatSuggestions(book: Book, prioritizeLastAssistantQuestion: Boolean = true) {
         if (!settings.translation.isConfigured) {
             chatSuggestionsByBook = chatSuggestionsByBook + (book.id to defaultReadingQuestions.randomThree())
             return
@@ -496,6 +499,7 @@ private fun EngReadApp() {
                         summary = chat?.summary.orEmpty(),
                         recentMessages = chat?.messages.orEmpty().takeLast(10),
                         settings = settings.translation,
+                        prioritizeLastAssistantQuestion = prioritizeLastAssistantQuestion,
                     )
                 }
             }
@@ -557,36 +561,69 @@ private fun EngReadApp() {
             }
             refreshAll()
 
+            val assistantMessage = ChatMessage(
+                id = UUID.randomUUID().toString(),
+                role = ChatRole.ASSISTANT,
+                content = "",
+                createdAt = System.currentTimeMillis(),
+            )
+            val chatBeforeAnswer = withContext(Dispatchers.IO) {
+                repository.getBookChat(book.id)
+            }
+            val messagesWithUser = chatBeforeAnswer?.messages.orEmpty()
+            withContext(Dispatchers.IO) {
+                repository.saveBookChat(
+                    book = book,
+                    summary = chatBeforeAnswer?.summary.orEmpty(),
+                    messages = messagesWithUser + assistantMessage,
+                )
+            }
+            refreshAll()
+
             val answerResult = withContext(Dispatchers.IO) {
                 runCatching {
-                    val currentChat = repository.getBookChat(book.id)
-                    val messagesWithUser = currentChat?.messages.orEmpty()
                     val recentMessages = messagesWithUser.takeLast(10)
-                    val answer = OpenAiBookChat.reply(
+                    val streamedAnswer = StringBuilder()
+                    val answer = OpenAiBookChat.replyStreaming(
                         book = book,
-                        summary = currentChat?.summary.orEmpty(),
+                        summary = chatBeforeAnswer?.summary.orEmpty(),
                         recentMessages = recentMessages,
                         settings = settings.translation,
-                    )
-                    val assistantMessage = ChatMessage(
-                        id = UUID.randomUUID().toString(),
-                        role = ChatRole.ASSISTANT,
-                        content = answer,
-                        createdAt = System.currentTimeMillis(),
-                    )
-                    val newMessages = listOf(userMessage, assistantMessage)
+                    ) { delta ->
+                        streamedAnswer.append(delta)
+                        val partial = streamedAnswer.toString()
+                        withContext(Dispatchers.Main) {
+                            bookChats = bookChats.map { chat ->
+                                if (chat.bookId == book.id) {
+                                    chat.copy(
+                                        messages = chat.messages.map { message ->
+                                            if (message.id == assistantMessage.id) {
+                                                message.copy(content = partial)
+                                            } else {
+                                                message
+                                            }
+                                        },
+                                    )
+                                } else {
+                                    chat
+                                }
+                            }
+                        }
+                    }.ifBlank { streamedAnswer.toString() }
+                    val finalAssistantMessage = assistantMessage.copy(content = answer)
+                    val newMessages = listOf(userMessage, finalAssistantMessage)
                     val nextSummary = runCatching {
                         OpenAiBookChat.summarize(
                             book = book,
-                            previousSummary = currentChat?.summary.orEmpty(),
+                            previousSummary = chatBeforeAnswer?.summary.orEmpty(),
                             newMessages = newMessages,
                             settings = settings.translation,
                         )
-                    }.getOrElse { currentChat?.summary.orEmpty() }
+                    }.getOrElse { chatBeforeAnswer?.summary.orEmpty() }
                     repository.saveBookChat(
                         book = book,
                         summary = nextSummary,
-                        messages = messagesWithUser + assistantMessage,
+                        messages = messagesWithUser + finalAssistantMessage,
                     )
                     if (quotedParagraph.isNotBlank()) {
                         repository.addNote(
@@ -602,12 +639,22 @@ private fun EngReadApp() {
                 }
             }
             sendingChatBookId = null
-            answerResult.onSuccess {
+            if (answerResult.isSuccess) {
                 refreshAll()
                 requestChatSuggestions(book)
-            }.onFailure { error ->
+            } else {
+                val error = answerResult.exceptionOrNull()
+                withContext(Dispatchers.IO) {
+                    repository.getBookChat(book.id)?.let { chat ->
+                        repository.saveBookChat(
+                            book = book,
+                            summary = chat.summary,
+                            messages = chat.messages.filterNot { it.id == assistantMessage.id },
+                        )
+                    }
+                }
                 refreshAll()
-                showMessage(error.message ?: "对话失败")
+                showMessage(error?.message ?: "对话失败")
             }
         }
     }
@@ -678,21 +725,37 @@ private fun EngReadApp() {
                                 repository.updateProgress(current.bookId, paragraphIndex)
                             }
                         },
-                        onAddNote = { paragraphIndex, sentence, translationText, noteText ->
+                        onAddNote = { paragraphIndex, sentence, translationText, noteText, noteType ->
                             book?.let { activeBook ->
-                                scope.launch {
-                                    withContext(Dispatchers.IO) {
-                                        repository.addNote(
-                                            activeBook,
-                                            paragraphIndex,
-                                            sentence,
-                                            translationText,
-                                            noteText,
-                                        )
-                                    }
-                                    refreshAll()
-                                    showMessage("已加入笔记本")
+                                val note = repository.addNote(
+                                    activeBook,
+                                    paragraphIndex,
+                                    sentence,
+                                    translationText,
+                                    noteText,
+                                    noteType,
+                                )
+                                refreshAll()
+                                showMessage("已加入笔记本")
+                                note
+                            }
+                        },
+                        onUpdateNoteTranslation = { noteIds, translationText ->
+                            scope.launch {
+                                val updatedNotes = withContext(Dispatchers.IO) {
+                                    noteIds.forEach { repository.updateNoteTranslation(it, translationText) }
+                                    repository.getNotes()
                                 }
+                                notes = updatedNotes
+                            }
+                        },
+                        onAddReadingTime = { durationMillis ->
+                            scope.launch {
+                                val updatedBooks = withContext(Dispatchers.IO) {
+                                    repository.addReadingTime(current.bookId, durationMillis)
+                                    repository.getBooks()
+                                }
+                                books = updatedBooks
                             }
                         },
                         onChatSelection = { paragraphIndex, paragraph, question ->
@@ -812,7 +875,9 @@ private fun EngReadApp() {
                         )
                     },
                     onSendMessage = { book, text -> sendBookChatMessage(book, text) },
-                    onRefreshSuggestions = { book -> requestChatSuggestions(book) },
+                    onRefreshSuggestions = { book, prioritizeLastAssistantQuestion ->
+                        requestChatSuggestions(book, prioritizeLastAssistantQuestion)
+                    },
                     onOpenReader = { book, paragraphIndex -> openReader(book, paragraphIndex) },
                     onAddLookupHistory = { activeBook, paragraphIndex, type, sourceText, resultText, phonetic ->
                         scope.launch(Dispatchers.IO) {
@@ -1208,7 +1273,7 @@ private fun ChatScreen(
     modifier: Modifier = Modifier,
     bottomBar: @Composable () -> Unit,
     onSendMessage: (Book, String) -> Unit,
-    onRefreshSuggestions: (Book) -> Unit,
+    onRefreshSuggestions: (Book, Boolean) -> Unit,
     onOpenReader: (Book, Int?) -> Unit,
     onAddLookupHistory: (Book, Int, LookupHistoryType, String, String, String) -> Unit,
 ) {
@@ -1239,7 +1304,9 @@ private fun ChatScreen(
     var localSuggestionsLoading by rememberSaveable(selectedBookId) { mutableStateOf(false) }
     var initialSuggestionsRequested by rememberSaveable(selectedBookId) { mutableStateOf(false) }
     val visibleSuggestions = remoteSuggestions.ifEmpty { localSuggestions }
-    val suggestionsAreLoading = suggestionsLoading || localSuggestionsLoading
+    val suggestionsAreLoading = suggestionsLoading ||
+        localSuggestionsLoading ||
+        (selectedBook != null && settings.translation.isConfigured && remoteSuggestions.isEmpty())
     var input by rememberSaveable(selectedBookId) { mutableStateOf("") }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1263,7 +1330,7 @@ private fun ChatScreen(
         val book = selectedBook ?: return@LaunchedEffect
         if (settings.translation.isConfigured && remoteSuggestions.isEmpty() && !initialSuggestionsRequested) {
             initialSuggestionsRequested = true
-            onRefreshSuggestions(book)
+            onRefreshSuggestions(book, true)
         }
     }
 
@@ -1478,7 +1545,7 @@ private fun ChatScreen(
                                         if (!settings.translation.isConfigured) {
                                             refreshLocalSuggestions()
                                         } else {
-                                            onRefreshSuggestions(book)
+                                            onRefreshSuggestions(book, false)
                                         }
                                     }
                                 )
@@ -2435,14 +2502,42 @@ private fun BookCard(
                     .height(6.dp)
                     .clip(RoundedCornerShape(8.dp)),
             )
-            Text(
-                text = formatTimestamp(book.updatedAt),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = formatTimestamp(book.updatedAt),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (book.totalReadingMillis > 0L) {
+                    Text(
+                        text = formatReadingDuration(book.totalReadingMillis),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                    )
+                }
+            }
         }
+    }
+}
+
+private fun formatReadingDuration(durationMillis: Long): String {
+    val minutes = (durationMillis / 60_000L).coerceAtLeast(0L)
+    if (minutes < 1L) return "阅读 <1 分钟"
+    if (minutes < 60L) return "阅读 ${minutes} 分钟"
+    val hours = minutes / 60L
+    val restMinutes = minutes % 60L
+    return if (restMinutes == 0L) {
+        "阅读 ${hours} 小时"
+    } else {
+        "阅读 ${hours} 小时 ${restMinutes} 分钟"
     }
 }
 
@@ -2599,7 +2694,9 @@ private fun ReaderScreen(
     onOpenChat: () -> Unit,
     onSettingsChange: (ReaderSettings) -> Unit,
     onProgress: (Int) -> Unit,
-    onAddNote: (paragraphIndex: Int, sentence: String, translationText: String, noteText: String) -> Unit,
+    onAddNote: (paragraphIndex: Int, sentence: String, translationText: String, noteText: String, noteType: ReaderNoteType) -> ReaderNote?,
+    onUpdateNoteTranslation: (List<String>, String) -> Unit,
+    onAddReadingTime: (Long) -> Unit,
     onChatSelection: (paragraphIndex: Int, paragraph: String, question: String) -> Unit,
     onAddLookupHistory: (paragraphIndex: Int, LookupHistoryType, sourceText: String, resultText: String, phonetic: String) -> Unit,
 ) {
@@ -2610,6 +2707,7 @@ private fun ReaderScreen(
 
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val dictionary = remember(context) { EcdictDictionary(context.applicationContext) }
     val configuration = LocalConfiguration.current
     val pageCharBudget = remember(
@@ -2665,6 +2763,8 @@ private fun ReaderScreen(
     var noteTranslationText by remember(book.id) { mutableStateOf("") }
     var noteTranslationLoading by remember(book.id) { mutableStateOf(false) }
     var noteTranslationIsError by remember(book.id) { mutableStateOf(false) }
+    var noteTranslationRequestId by remember(book.id) { mutableStateOf(0) }
+    val pendingNoteTranslationIds = remember(book.id) { mutableStateMapOf<Int, List<String>>() }
     var chatSelectionText by remember(book.id) { mutableStateOf<String?>(null) }
     var chatSelectionParagraphIndex by remember(book.id) { mutableStateOf(0) }
     var wordStack by remember(book.id) { mutableStateOf<List<WordEntry>>(emptyList()) }
@@ -2827,6 +2927,33 @@ private fun ReaderScreen(
         }
     }
 
+    DisposableEffect(book.id, lifecycleOwner) {
+        var activeSince = 0L
+        fun flushReadingTime() {
+            if (activeSince > 0L) {
+                val delta = System.currentTimeMillis() - activeSince
+                activeSince = 0L
+                if (delta > 1_000L) onAddReadingTime(delta)
+            }
+        }
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> activeSince = System.currentTimeMillis()
+                Lifecycle.Event.ON_PAUSE,
+                Lifecycle.Event.ON_STOP -> flushReadingTime()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            activeSince = System.currentTimeMillis()
+        }
+        onDispose {
+            flushReadingTime()
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
     LaunchedEffect(tts) {
         delay(3_000)
         if (!ttsReady && ttsStatusText == "TTS 正在初始化") {
@@ -2914,6 +3041,8 @@ private fun ReaderScreen(
     fun openNoteDialog(sourceText: String, knownTranslation: String? = null) {
         if (sourceText.isBlank()) return
         noteSelectionText = sourceText
+        val requestId = ++noteTranslationRequestId
+        pendingNoteTranslationIds.remove(requestId)
         if (knownTranslation != null) {
             noteTranslationText = knownTranslation
             noteTranslationLoading = false
@@ -2927,14 +3056,19 @@ private fun ReaderScreen(
             val result = runCatching {
                 OpenAiChatTranslator.translate(sourceText, settings.translation)
             }
-            result.onSuccess {
-                noteTranslationText = it
+            result.onSuccess { translated ->
+                pendingNoteTranslationIds.remove(requestId)?.takeIf { ids -> ids.isNotEmpty() }?.let { ids ->
+                    onUpdateNoteTranslation(ids, translated)
+                }
+                if (requestId != noteTranslationRequestId) return@onSuccess
+                noteTranslationText = translated
                 noteTranslationIsError = false
-            }.onFailure {
-                noteTranslationText = it.message ?: "翻译失败"
+            }.onFailure { error ->
+                if (requestId != noteTranslationRequestId) return@onFailure
+                noteTranslationText = error.message ?: "翻译失败"
                 noteTranslationIsError = true
             }
-            noteTranslationLoading = false
+            if (requestId == noteTranslationRequestId) noteTranslationLoading = false
         }
     }
 
@@ -3197,12 +3331,23 @@ private fun ReaderScreen(
                 },
                 onHighlightSelection = {
                     if (selectedText.isNotBlank()) {
-                        onAddNote(
+                        val note = onAddNote(
                             page.paragraphIndexForDisplayOffset(selectionRange?.first ?: 0),
                             selectedText,
                             "",
                             "",
+                            ReaderNoteType.HIGHLIGHT,
                         )
+                        note?.let { savedNote ->
+                            scope.launch {
+                                val result = runCatching {
+                                    OpenAiChatTranslator.translate(selectedText, settings.translation)
+                                }
+                                result.onSuccess { translated ->
+                                    onUpdateNoteTranslation(listOf(savedNote.id), translated)
+                                }
+                            }
+                        }
                         selectionTipVisible = true
                     }
                 },
@@ -3275,18 +3420,19 @@ private fun ReaderScreen(
                 if (selectedText.isNotBlank()) selectionTipVisible = true
             },
             onSave = { sentences, translationText, noteText ->
-                sentences.forEach { sentence ->
+                val savedNoteIds = sentences.mapNotNull { sentence ->
                     onAddNote(
                         page.paragraphIndexForDisplayOffset(selectionRange?.first ?: 0),
                         sentence,
                         translationText,
                         noteText,
-                    )
+                        ReaderNoteType.EXCERPT,
+                    )?.id
+                }
+                if (translationText.isBlank() && noteTranslationLoading && savedNoteIds.isNotEmpty()) {
+                    pendingNoteTranslationIds[noteTranslationRequestId] = savedNoteIds
                 }
                 noteSelectionText = null
-                noteTranslationText = ""
-                noteTranslationLoading = false
-                noteTranslationIsError = false
                 if (selectedText.isNotBlank()) selectionTipVisible = true
             },
         )
@@ -4938,7 +5084,7 @@ private fun SentenceNoteDialog(
                         noteText,
                     )
                 },
-                enabled = excerpt.isNotBlank() && !translationLoading,
+                enabled = excerpt.isNotBlank(),
                 shape = RoundedCornerShape(8.dp),
             ) {
                 Text("保存")

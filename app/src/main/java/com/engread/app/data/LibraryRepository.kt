@@ -174,6 +174,16 @@ class LibraryRepository(
     }
 
     @Synchronized
+    fun updateNoteTranslation(noteId: String, translationText: String) {
+        val now = System.currentTimeMillis()
+        saveNotes(
+            getNotes().map { note ->
+                if (note.id == noteId) note.copy(translationText = translationText.trim(), updatedAt = now) else note
+            },
+        )
+    }
+
+    @Synchronized
     fun deleteNote(noteId: String) {
         saveNotes(getNotes().filterNot { it.id == noteId })
     }
@@ -287,6 +297,23 @@ class LibraryRepository(
         return chat
     }
 
+    @Synchronized
+    fun addReadingTime(bookId: String, durationMillis: Long) {
+        if (durationMillis <= 0L) return
+        saveBooks(
+            getBooks().map { book ->
+                if (book.id == bookId) {
+                    book.copy(
+                        totalReadingMillis = book.totalReadingMillis + durationMillis,
+                        updatedAt = System.currentTimeMillis(),
+                    )
+                } else {
+                    book
+                }
+            },
+        )
+    }
+
     fun buildNotesMarkdown(notes: List<ReaderNote> = getNotes()): String {
         if (notes.isEmpty()) {
             return "# EngRead Notes\n\n暂无笔记。\n"
@@ -309,7 +336,7 @@ class LibraryRepository(
                             appendLine("  回答：${note.translationText}")
                         }
                     } else {
-                        appendLine("- 类型：摘句")
+                        appendLine("- 类型：${note.noteType.label}")
                         appendLine("  原文：${note.sentence}")
                         if (note.translationText.isNotBlank()) {
                             appendLine("  译文：${note.translationText}")
@@ -422,6 +449,7 @@ private fun Book.toJson(): JSONObject =
         .put("addedAt", addedAt)
         .put("updatedAt", updatedAt)
         .put("lastReadParagraph", lastReadParagraph)
+        .put("totalReadingMillis", totalReadingMillis)
 
 private fun JSONObject.toBook(): Book {
     val paragraphArray = optJSONArray("paragraphs") ?: JSONArray()
@@ -460,6 +488,7 @@ private fun JSONObject.toBook(): Book {
         addedAt = optLong("addedAt"),
         updatedAt = optLong("updatedAt"),
         lastReadParagraph = optInt("lastReadParagraph", 0),
+        totalReadingMillis = optLong("totalReadingMillis", 0L),
     )
 }
 

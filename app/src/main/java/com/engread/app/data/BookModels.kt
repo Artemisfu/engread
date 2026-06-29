@@ -11,6 +11,7 @@ data class Book(
     val addedAt: Long,
     val updatedAt: Long,
     val lastReadParagraph: Int = 0,
+    val totalReadingMillis: Long = 0L,
 ) {
     val progress: Float
         get() {
@@ -83,6 +84,7 @@ data class ReaderNote(
 
 enum class ReaderNoteType(val label: String) {
     EXCERPT("摘句"),
+    HIGHLIGHT("划线"),
     CHAT("对话"),
 }
 
