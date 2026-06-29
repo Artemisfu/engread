@@ -256,6 +256,16 @@ class LibraryRepository(
     }
 
     @Synchronized
+    fun updateLookupHistoryNote(id: String, noteText: String) {
+        val now = System.currentTimeMillis()
+        saveLookupHistory(
+            getLookupHistory().map { entry ->
+                if (entry.id == id) entry.copy(noteText = noteText.trim(), updatedAt = now) else entry
+            },
+        )
+    }
+
+    @Synchronized
     fun restoreLookupHistory(entry: LookupHistoryEntry) {
         saveLookupHistory((listOf(entry) + getLookupHistory().filterNot { it.id == entry.id }).take(300))
     }
@@ -554,6 +564,7 @@ private fun LookupHistoryEntry.toJson(): JSONObject =
         .put("sourceText", sourceText)
         .put("resultText", resultText)
         .put("phonetic", phonetic)
+        .put("noteText", noteText)
         .put("createdAt", createdAt)
         .put("updatedAt", updatedAt)
 
@@ -567,6 +578,7 @@ private fun JSONObject.toLookupHistoryEntry(): LookupHistoryEntry =
         sourceText = optString("sourceText"),
         resultText = optString("resultText"),
         phonetic = optString("phonetic"),
+        noteText = optString("noteText"),
         createdAt = optLong("createdAt"),
         updatedAt = optLong("updatedAt", optLong("createdAt")),
     )

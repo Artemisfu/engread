@@ -111,6 +111,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -404,6 +405,17 @@ private fun EngReadApp() {
         scope.launch { snackbarHostState.showSnackbar(message) }
     }
 
+    fun showMessageAction(message: String, actionLabel: String, onAction: () -> Unit) {
+        scope.launch {
+            val result = snackbarHostState.showSnackbar(
+                message = message,
+                actionLabel = actionLabel,
+                withDismissAction = true,
+            )
+            if (result == SnackbarResult.ActionPerformed) onAction()
+        }
+    }
+
     fun showUndoMessage(message: String, onRestore: suspend () -> Unit) {
         undoNotices = undoNotices + UndoNotice(message = message, onAction = onRestore)
     }
@@ -695,7 +707,9 @@ private fun EngReadApp() {
                 )
             }
             refreshAll()
-            showMessage("已加入笔记")
+            showMessageAction("已加入笔记", "查看") {
+                screen = AppScreen.Notes
+            }
         }
     }
 
@@ -856,6 +870,13 @@ private fun EngReadApp() {
                     onUpdateNote = { note, text ->
                         scope.launch {
                             withContext(Dispatchers.IO) { repository.updateNote(note.id, text) }
+                            refreshAll()
+                            showMessage("笔记已更新")
+                        }
+                    },
+                    onUpdateLookupNote = { entry, text ->
+                        scope.launch {
+                            withContext(Dispatchers.IO) { repository.updateLookupHistoryNote(entry.id, text) }
                             refreshAll()
                             showMessage("笔记已更新")
                         }
@@ -1883,14 +1904,6 @@ private fun ChatMessageBubble(
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    if (!fromUser) {
-                        Text(
-                            text = "EngRead",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontWeight = FontWeight.Bold,
-                        )
-                    }
                     if (!fromUser && message.thinking.isNotBlank()) {
                         ChatThinkingProcess(
                             text = message.thinking,
@@ -5542,6 +5555,7 @@ private fun NotesScreen(
     bottomBar: @Composable () -> Unit,
     onExport: () -> Unit,
     onUpdateNote: (ReaderNote, String) -> Unit,
+    onUpdateLookupNote: (LookupHistoryEntry, String) -> Unit,
     onDeleteNote: (ReaderNote) -> Unit,
     onDeleteSelectedItems: (List<ReaderNote>, List<LookupHistoryEntry>) -> Unit,
     onDeleteLookupHistory: (List<LookupHistoryEntry>) -> Unit,
@@ -5549,6 +5563,7 @@ private fun NotesScreen(
     onOpenSource: (String, Int) -> Unit,
 ) {
     var editingNote by remember { mutableStateOf<ReaderNote?>(null) }
+    var editingLookupEntry by remember { mutableStateOf<LookupHistoryEntry?>(null) }
     var deletingNote by remember { mutableStateOf<ReaderNote?>(null) }
     var batchDeleteConfirmOpen by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
@@ -5739,6 +5754,7 @@ private fun NotesScreen(
                                             selectedItemIds.remove(timelineItem.id)
                                         }
                                     },
+                                    onEdit = { editingLookupEntry = timelineItem.item },
                                     onOpenSource = { onOpenSource(timelineItem.item.bookId, timelineItem.item.paragraphIndex) },
                                     onDelete = { onDeleteLookupHistory(listOf(timelineItem.item)) },
                                 )
@@ -5758,6 +5774,18 @@ private fun NotesScreen(
             onSave = { nextText ->
                 editingNote = null
                 onUpdateNote(note, nextText)
+            },
+        )
+    }
+
+    editingLookupEntry?.let { entry ->
+        EditLookupHistoryNoteDialog(
+            entry = entry,
+            noteFont = noteFont,
+            onDismiss = { editingLookupEntry = null },
+            onSave = { nextText ->
+                editingLookupEntry = null
+                onUpdateLookupNote(entry, nextText)
             },
         )
     }
@@ -6232,6 +6260,7 @@ private fun LookupHistoryCard(
     selected: Boolean,
     onToggleExpanded: () -> Unit,
     onSelectedChange: (Boolean) -> Unit,
+    onEdit: () -> Unit,
     onOpenSource: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -6280,6 +6309,11 @@ private fun LookupHistoryCard(
                             modifier = Modifier.weight(1f),
                         )
                         if (!batchDeleteMode) {
+                            if (item.type == LookupHistoryType.TRANSLATION) {
+                                IconButton(onClick = onEdit) {
+                                    Icon(Icons.Filled.Edit, contentDescription = "编辑笔记")
+                                }
+                            }
                             IconButton(onClick = onOpenSource) {
                                 Icon(Icons.Filled.AutoStories, contentDescription = "回原文")
                             }
@@ -6322,6 +6356,23 @@ private fun LookupHistoryCard(
                             )
                         }
                     }
+                    if (!showEnglishOnly && item.noteText.isNotBlank()) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(
+                                text = "自己的笔记",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            Text(
+                                text = if (showDetails) item.noteText else item.noteText.compactText(96),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = if (showDetails) Int.MAX_VALUE else 3,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -6352,6 +6403,62 @@ private fun EditNoteDialog(
                 if (note.translationText.isNotBlank()) {
                     Text(
                         text = note.translationText,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .padding(10.dp),
+                    )
+                }
+                TextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    minLines = 4,
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = noteFont.toFontFamily()),
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("自己的笔记") },
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onSave(text) }, shape = RoundedCornerShape(8.dp)) {
+                Text("保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        },
+    )
+}
+
+@Composable
+private fun EditLookupHistoryNoteDialog(
+    entry: LookupHistoryEntry,
+    noteFont: ReaderFont,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+) {
+    var text by remember(entry.id) { mutableStateOf(entry.noteText) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Filled.Edit, contentDescription = null) },
+        title = { Text("编辑翻译笔记") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    text = entry.sourceText,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 5,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (entry.resultText.isNotBlank()) {
+                    Text(
+                        text = entry.resultText,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier

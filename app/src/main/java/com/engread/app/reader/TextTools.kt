@@ -72,6 +72,13 @@ data class BookChatStreamChunk(
 )
 
 private const val BookChatFinalAnswerMarker = "<ENGREAD_FINAL_ANSWER>"
+private val BookChatFinalAnswerMarkerVariants = listOf(
+    BookChatFinalAnswerMarker,
+    "</ENGREAD_FINAL_ANSWER>",
+    "<ENGREAD_FINAL_ANSWER/>",
+    "<ENGREAD_FINAL_ANSWER />",
+)
+private val BookChatFinalAnswerTagRegex = Regex("</?ENGREAD_FINAL_ANSWER\\s*/?>", RegexOption.IGNORE_CASE)
 
 fun buildReaderPages(
     paragraphs: List<String>,
@@ -615,7 +622,7 @@ private fun bookChatMessages(userPrompt: String): JSONArray =
                         "Use Markdown where it improves readability. When useful, call the book search tools before answering. " +
                         "If you need multiple tool-call rounds, any text before the final answer must be only brief visible progress notes, not hidden chain-of-thought. " +
                         "When you start the final answer, output the exact marker $BookChatFinalAnswerMarker first, then the final answer. " +
-                        "Do not output the marker in intermediate progress notes. " +
+                        "Do not output the marker in intermediate progress notes, and do not output any closing/end marker. " +
                         "When you cite or point back to a book location, include a clickable anchor in this exact Markdown format: " +
                         "[§ 章节名：段落概述](engread://paragraph/0), replacing 0 with the zero-based paragraph_index returned by tools. " +
                         "Use short chapter and summary text; do not invent paragraph_index values. " +
@@ -680,6 +687,7 @@ private suspend fun TranslationSettings.createBookToolLoopCompletionStreaming(
         val toolCalls = message.optJSONArray("tool_calls")
         if (toolCalls == null || toolCalls.length() == 0) {
             finalMarkerParser.flushThinking(onChunk)
+            finalMarkerParser.flushFinal(onChunk)
             if (!finalMarkerParser.finalStarted && lastContent.isNotBlank()) {
                 val fallbackFinal = lastContent.stripBookChatFinalMarker()
                 finalMarkerParser.replaceFinal(fallbackFinal, onChunk)
@@ -695,6 +703,7 @@ private suspend fun TranslationSettings.createBookToolLoopCompletionStreaming(
             val function = call.optJSONObject("function") ?: continue
             val name = function.optActualString("name")
             val args = function.optActualString("arguments").toJsonObjectOrEmpty()
+            onChunk(BookChatStreamChunk(BookChatStreamChunkType.THINKING_APPEND, book.describeBookToolUse(name, args) + "\n"))
             val result = runCatching { book.executeBookTool(name, args) }
                 .getOrElse { error -> JSONObject().put("error", error.message ?: "tool failed") }
             messages.put(
@@ -705,7 +714,11 @@ private suspend fun TranslationSettings.createBookToolLoopCompletionStreaming(
             )
         }
     }
-    return lastContent.takeIf { it.isNotBlank() } ?: error("工具调用没有产生最终回复。")
+    finalMarkerParser.flushThinking(onChunk)
+    finalMarkerParser.flushFinal(onChunk)
+    return finalMarkerParser.finalText().takeIf { it.isNotBlank() }
+        ?: lastContent.stripBookChatFinalMarker().takeIf { it.isNotBlank() }
+        ?: error("工具调用没有产生最终回复。")
 }
 
 private fun Book.bookChatToolDefinitions(): JSONArray =
@@ -803,6 +816,14 @@ private fun Book.executeBookTool(name: String, args: JSONObject): JSONObject =
                 },
             )
         else -> JSONObject().put("error", "Unknown tool: $name")
+    }
+
+private fun Book.describeBookToolUse(name: String, args: JSONObject): String =
+    when (name) {
+        "search_book" -> "查阅中：检索「${args.optString("query").ifBlank { "关键词" }}」"
+        "get_text_block" -> "查阅中：读取第 ${args.optInt("paragraph_index") + 1} 段附近文本"
+        "get_table_of_contents" -> "查阅中：查看《${title}》目录"
+        else -> "查阅中：读取本书资料"
     }
 
 private fun Book.searchBookTool(query: String, maxResults: Int): JSONObject {
@@ -944,6 +965,7 @@ private class BookChatFinalMarkerParser(
     private val marker: String = BookChatFinalAnswerMarker,
 ) {
     private val pending = StringBuilder()
+    private val finalPending = StringBuilder()
     private val finalBuilder = StringBuilder()
     var finalStarted: Boolean = false
         private set
@@ -954,8 +976,7 @@ private class BookChatFinalMarkerParser(
     ) {
         if (text.isEmpty()) return
         if (finalStarted) {
-            finalBuilder.append(text)
-            onChunk(BookChatStreamChunk(BookChatStreamChunkType.FINAL_APPEND, text))
+            appendFinal(text, onChunk)
             return
         }
         pending.append(text)
@@ -969,8 +990,7 @@ private class BookChatFinalMarkerParser(
             pending.clear()
             finalStarted = true
             if (after.isNotEmpty()) {
-                finalBuilder.append(after)
-                onChunk(BookChatStreamChunk(BookChatStreamChunkType.FINAL_APPEND, after))
+                appendFinal(after, onChunk)
             }
             return
         }
@@ -992,18 +1012,47 @@ private class BookChatFinalMarkerParser(
         }
     }
 
+    suspend fun flushFinal(onChunk: suspend (BookChatStreamChunk) -> Unit) {
+        if (finalStarted && finalPending.isNotEmpty()) {
+            appendFinal("", onChunk, force = true)
+        }
+    }
+
     suspend fun replaceFinal(
         text: String,
         onChunk: suspend (BookChatStreamChunk) -> Unit,
     ) {
         pending.clear()
+        finalPending.clear()
         finalBuilder.clear()
-        finalBuilder.append(text)
+        val cleaned = text.stripBookChatFinalMarker()
+        finalBuilder.append(cleaned)
         finalStarted = true
-        onChunk(BookChatStreamChunk(BookChatStreamChunkType.FINAL_REPLACE, text))
+        onChunk(BookChatStreamChunk(BookChatStreamChunkType.FINAL_REPLACE, cleaned))
     }
 
-    fun finalText(): String = finalBuilder.toString().trim()
+    fun finalText(): String = (finalBuilder.toString() + finalPending.toString()).stripBookChatFinalMarker()
+
+    private suspend fun appendFinal(
+        text: String,
+        onChunk: suspend (BookChatStreamChunk) -> Unit,
+        force: Boolean = false,
+    ) {
+        if (text.isNotEmpty()) {
+            finalPending.append(text)
+            val cleaned = finalPending.toString().removeBookChatFinalMarkers()
+            finalPending.clear()
+            finalPending.append(cleaned)
+        }
+        val keepLength = if (force) 0 else finalPending.longestSuffixThatPrefixesAny(BookChatFinalAnswerMarkerVariants)
+        val emitLength = finalPending.length - keepLength
+        if (emitLength > 0) {
+            val finalText = finalPending.substring(0, emitLength)
+            finalPending.delete(0, emitLength)
+            finalBuilder.append(finalText)
+            onChunk(BookChatStreamChunk(BookChatStreamChunkType.FINAL_APPEND, finalText))
+        }
+    }
 }
 
 private data class StreamingToolCall(
@@ -1251,8 +1300,14 @@ private fun CharSequence.longestSuffixThatPrefixes(prefix: String): Int {
     return 0
 }
 
+private fun CharSequence.longestSuffixThatPrefixesAny(prefixes: List<String>): Int =
+    prefixes.maxOfOrNull { longestSuffixThatPrefixes(it) } ?: 0
+
+private fun String.removeBookChatFinalMarkers(): String =
+    replace(BookChatFinalAnswerTagRegex, "")
+
 private fun String.stripBookChatFinalMarker(): String =
-    replace(BookChatFinalAnswerMarker, "").trim()
+    removeBookChatFinalMarkers().trim()
 
 private fun String.toChatCompletionsEndpoint(): String {
     val trimmed = trim().trimEnd('/')

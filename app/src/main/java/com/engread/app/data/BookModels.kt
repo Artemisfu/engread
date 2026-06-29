@@ -97,6 +97,7 @@ data class LookupHistoryEntry(
     val sourceText: String,
     val resultText: String,
     val phonetic: String = "",
+    val noteText: String = "",
     val createdAt: Long,
     val updatedAt: Long = createdAt,
 )
