@@ -617,7 +617,7 @@ private fun TranslationSettings.createBookToolLoopCompletion(book: Book, userPro
             temperature = 0.35,
             tools = tools,
         )
-        lastContent = message.optString("content").trim()
+        lastContent = message.optActualString("content").trim()
         val toolCalls = message.optJSONArray("tool_calls")
         if (toolCalls == null || toolCalls.length() == 0) {
             return lastContent.takeIf { it.isNotBlank() } ?: error("服务没有返回可用内容。")
@@ -626,14 +626,14 @@ private fun TranslationSettings.createBookToolLoopCompletion(book: Book, userPro
         for (index in 0 until toolCalls.length()) {
             val call = toolCalls.optJSONObject(index) ?: continue
             val function = call.optJSONObject("function") ?: continue
-            val name = function.optString("name")
-            val args = function.optString("arguments").toJsonObjectOrEmpty()
+            val name = function.optActualString("name")
+            val args = function.optActualString("arguments").toJsonObjectOrEmpty()
             val result = runCatching { book.executeBookTool(name, args) }
                 .getOrElse { error -> JSONObject().put("error", error.message ?: "tool failed") }
             messages.put(
                 JSONObject()
                     .put("role", "tool")
-                    .put("tool_call_id", call.optString("id"))
+                    .put("tool_call_id", call.optActualString("id"))
                     .put("content", result.toString()),
             )
         }
@@ -656,7 +656,7 @@ private suspend fun TranslationSettings.createBookToolLoopCompletionStreaming(
             tools = tools,
             onDelta = onDelta,
         )
-        lastContent = message.optString("content").trim()
+        lastContent = message.optActualString("content").trim()
         val toolCalls = message.optJSONArray("tool_calls")
         if (toolCalls == null || toolCalls.length() == 0) {
             return lastContent.takeIf { it.isNotBlank() } ?: error("服务没有返回可用内容。")
@@ -665,14 +665,14 @@ private suspend fun TranslationSettings.createBookToolLoopCompletionStreaming(
         for (index in 0 until toolCalls.length()) {
             val call = toolCalls.optJSONObject(index) ?: continue
             val function = call.optJSONObject("function") ?: continue
-            val name = function.optString("name")
-            val args = function.optString("arguments").toJsonObjectOrEmpty()
+            val name = function.optActualString("name")
+            val args = function.optActualString("arguments").toJsonObjectOrEmpty()
             val result = runCatching { book.executeBookTool(name, args) }
                 .getOrElse { error -> JSONObject().put("error", error.message ?: "tool failed") }
             messages.put(
                 JSONObject()
                     .put("role", "tool")
-                    .put("tool_call_id", call.optString("id"))
+                    .put("tool_call_id", call.optActualString("id"))
                     .put("content", result.toString()),
             )
         }
@@ -907,7 +907,7 @@ private fun JSONObject.optStringList(name: String): List<String> {
 
 private fun TranslationSettings.createChatCompletion(messages: JSONArray, temperature: Double): String =
     createChatCompletionMessage(messages = messages, temperature = temperature)
-        .optString("content")
+        .optActualString("content")
         .trim()
         .takeIf { it.isNotBlank() }
         ?: error("服务没有返回可用内容。")
@@ -970,7 +970,7 @@ private suspend fun TranslationSettings.createChatCompletionMessageStream(
                         ?.optJSONObject(0)
                         ?.optJSONObject("delta")
                 }.getOrNull() ?: continue
-                val textDelta = delta.optString("content").orEmpty()
+                val textDelta = delta.optActualString("content")
                 if (textDelta.isNotEmpty()) {
                     content.append(textDelta)
                     onDelta(textDelta)
@@ -980,11 +980,11 @@ private suspend fun TranslationSettings.createChatCompletionMessageStream(
                     val toolDelta = toolCalls.optJSONObject(index) ?: continue
                     val toolIndex = toolDelta.optInt("index", index)
                     val call = streamedToolCalls.getOrPut(toolIndex) { StreamingToolCall() }
-                    toolDelta.optString("id").takeIf { it.isNotBlank() }?.let { call.id = it }
-                    toolDelta.optString("type").takeIf { it.isNotBlank() }?.let { call.type = it }
+                    toolDelta.optActualString("id").takeIf { it.isNotBlank() }?.let { call.id = it }
+                    toolDelta.optActualString("type").takeIf { it.isNotBlank() }?.let { call.type = it }
                     val function = toolDelta.optJSONObject("function") ?: continue
-                    function.optString("name").takeIf { it.isNotBlank() }?.let { call.name = it }
-                    function.optString("arguments").takeIf { it.isNotBlank() }?.let { call.arguments.append(it) }
+                    function.optActualString("name").takeIf { it.isNotBlank() }?.let { call.name = it }
+                    function.optActualString("arguments").takeIf { it.isNotBlank() }?.let { call.arguments.append(it) }
                 }
             }
         }
@@ -1013,7 +1013,7 @@ private suspend fun TranslationSettings.createChatCompletionMessageStream(
             )
         }
         return message.takeIf {
-            it.optString("content").isNotBlank() ||
+            it.optActualString("content").isNotBlank() ||
                 (it.optJSONArray("tool_calls")?.length() ?: 0) > 0
         } ?: error("服务没有返回可用内容。")
     } finally {
@@ -1065,7 +1065,7 @@ private suspend fun TranslationSettings.createChatCompletionStream(
                         .optJSONArray("choices")
                         ?.optJSONObject(0)
                         ?.optJSONObject("delta")
-                        ?.optString("content")
+                        ?.optActualString("content")
                         .orEmpty()
                 }.getOrDefault("")
                 if (delta.isNotEmpty()) {
@@ -1126,7 +1126,7 @@ private fun TranslationSettings.createChatCompletionMessage(
             ?.optJSONObject(0)
             ?.optJSONObject("message")
             ?.takeIf { message ->
-                message.optString("content").isNotBlank() ||
+                message.optActualString("content").isNotBlank() ||
                     (message.optJSONArray("tool_calls")?.length() ?: 0) > 0
             }
             ?: error("服务没有返回可用内容。")
@@ -1134,6 +1134,13 @@ private fun TranslationSettings.createChatCompletionMessage(
         connection.disconnect()
     }
 }
+
+private fun JSONObject.optActualString(name: String): String =
+    if (has(name) && !isNull(name)) {
+        optString(name)
+    } else {
+        ""
+    }
 
 private fun String.toChatCompletionsEndpoint(): String {
     val trimmed = trim().trimEnd('/')
