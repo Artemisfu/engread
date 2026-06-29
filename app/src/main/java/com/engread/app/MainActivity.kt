@@ -141,6 +141,7 @@ import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.positionChangedIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -148,7 +149,9 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
@@ -159,7 +162,10 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.text.KeyboardOptions
@@ -182,6 +188,7 @@ import com.engread.app.reader.OpenAiBookChat
 import com.engread.app.reader.OpenAiChatTranslator
 import com.engread.app.reader.OpenAiWordLookup
 import com.engread.app.reader.ReaderPage
+import com.engread.app.reader.ReaderPageParagraph
 import com.engread.app.reader.WordEntry
 import com.engread.app.reader.buildBookChapters
 import com.engread.app.reader.buildReaderPages
@@ -3114,7 +3121,18 @@ private fun ReaderScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val dictionary = remember(context) { EcdictDictionary(context.applicationContext) }
     val configuration = LocalConfiguration.current
-    val pageCharBudget = remember(
+    val textMeasurer = rememberTextMeasurer()
+    val readerFontFamily = settings.font.toFontFamily()
+    val readerTextStyle = MaterialTheme.typography.bodyLarge.copy(
+        fontFamily = readerFontFamily,
+        fontSize = settings.fontSizeSp.sp,
+        lineHeight = (settings.fontSizeSp * 1.72f).sp,
+        textAlign = TextAlign.Start,
+    )
+    var textViewportSize by remember(book.id, settings.font, settings.fontSizeSp) {
+        mutableStateOf(IntSize.Zero)
+    }
+    val fallbackPageCharBudget = remember(
         configuration.screenWidthDp,
         configuration.screenHeightDp,
         settings.fontSizeSp,
@@ -3127,12 +3145,32 @@ private fun ReaderScreen(
     }
     val chapters = remember(book.id, book.paragraphs, book.toc) { book.readerChapters() }
     val chapterParagraphIndices = remember(chapters) { chapters.map { it.paragraphIndex }.toSet() }
-    val pages = remember(book.id, book.paragraphs, pageCharBudget, chapterParagraphIndices) {
-        buildReaderPages(
-            paragraphs = book.paragraphs,
-            maxChars = pageCharBudget,
-            chapterParagraphIndices = chapterParagraphIndices,
-        )
+    val pages = remember(
+        book.id,
+        book.paragraphs,
+        fallbackPageCharBudget,
+        chapterParagraphIndices,
+        settings.font,
+        settings.fontSizeSp,
+        textViewportSize,
+    ) {
+        if (textViewportSize.width > 0 && textViewportSize.height > 0) {
+            buildMeasuredReaderPages(
+                paragraphs = book.paragraphs,
+                chapterParagraphIndices = chapterParagraphIndices,
+                textMeasurer = textMeasurer,
+                textStyle = readerTextStyle,
+                textWidthPx = textViewportSize.width,
+                textHeightPx = textViewportSize.height,
+                fontSizeSp = settings.fontSizeSp,
+            )
+        } else {
+            buildReaderPages(
+                paragraphs = book.paragraphs,
+                maxChars = fallbackPageCharBudget,
+                chapterParagraphIndices = chapterParagraphIndices,
+            )
+        }
     }
     var savedAnchorParagraph by rememberSaveable(book.id) {
         mutableStateOf(book.lastReadParagraph)
@@ -3156,7 +3194,7 @@ private fun ReaderScreen(
     var pageIndex by remember(book.id) {
         mutableStateOf(pages.findPageIndexForAnchor(pageAnchor))
     }
-    LaunchedEffect(pageCharBudget, pages.size) {
+    LaunchedEffect(textViewportSize, settings.font, settings.fontSizeSp, pages.size) {
         val anchoredIndex = pages.findPageIndexForAnchor(pageAnchor)
         if (anchoredIndex != pageIndex) pageIndex = anchoredIndex
     }
@@ -3415,6 +3453,7 @@ private fun ReaderScreen(
             ?: chapters.firstOrNull()?.title
             ?: "开始阅读"
     }
+    val bottomReaderPanelVisible = wordStack.isNotEmpty() || translationText != null
 
     fun clearReaderOverlays() {
         wordLookupSerial += 1
@@ -3746,6 +3785,15 @@ private fun ReaderScreen(
                 onOpenToc = { tocOpen = true },
                 onOpenChat = onOpenChat,
                 onOpenPageSettings = { pageSettingsOpen = true },
+                onTextViewportChange = { size ->
+                    if (!bottomReaderPanelVisible &&
+                        size.width > 0 &&
+                        size.height > 0 &&
+                        size != textViewportSize
+                    ) {
+                        textViewportSize = size
+                    }
+                },
                 onWordLongPress = { word, paragraphIndex, wordRange ->
                     selectionStartAnchor = null
                     selectionEndAnchor = null
@@ -3948,6 +3996,7 @@ private fun ReaderPageSurface(
     onOpenToc: () -> Unit,
     onOpenChat: () -> Unit,
     onOpenPageSettings: () -> Unit,
+    onTextViewportChange: (IntSize) -> Unit,
     onWordLongPress: (String, Int, IntRange?) -> Unit,
     onSelectionChange: (ReaderPageAnchor, ReaderPageAnchor) -> Unit,
     onSelectionPageTurn: (Boolean) -> Unit,
@@ -4040,6 +4089,8 @@ private fun ReaderPageSurface(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .weight(1f)
+                    .onSizeChanged(onTextViewportChange)
             ) {
                 Text(
                     text = annotatedText,
@@ -4096,9 +4147,6 @@ private fun ReaderPageSurface(
                     )
                 }
             }
-
-            Spacer(Modifier.weight(1f))
-
         }
 
         if (controlsVisible) {
@@ -4125,6 +4173,219 @@ private fun estimateReaderPageCharBudget(
     val estimatedLines = (availableHeight / lineHeight).toInt().coerceAtLeast(8)
     val estimatedCharsPerLine = (textWidth / (fontSizeSp * 0.56f)).toInt().coerceAtLeast(18)
     return (estimatedLines * estimatedCharsPerLine * 0.78f).toInt().coerceIn(420, 1_680)
+}
+
+private fun buildMeasuredReaderPages(
+    paragraphs: List<String>,
+    chapterParagraphIndices: Set<Int>,
+    textMeasurer: TextMeasurer,
+    textStyle: TextStyle,
+    textWidthPx: Int,
+    textHeightPx: Int,
+    fontSizeSp: Int,
+): List<ReaderPage> {
+    if (textWidthPx <= 0 || textHeightPx <= 0) {
+        return buildReaderPages(paragraphs = paragraphs, chapterParagraphIndices = chapterParagraphIndices)
+    }
+
+    val measuredWidth = textWidthPx.coerceAtLeast(1)
+    val measuredHeight = (textHeightPx - 6).coerceAtLeast(1)
+    val pages = mutableListOf<ReaderPage>()
+    val current = mutableListOf<ReaderPageParagraph>()
+    var shouldDropCapNextBody = true
+
+    fun pageFrom(pageParagraphs: List<ReaderPageParagraph>): ReaderPage =
+        ReaderPage(
+            index = pages.size,
+            firstParagraphIndex = pageParagraphs.first().paragraphIndex,
+            lastParagraphIndex = pageParagraphs.last().paragraphIndex,
+            paragraphs = pageParagraphs,
+        )
+
+    fun flushPage() {
+        if (current.isEmpty()) return
+        pages += pageFrom(current.toList())
+        current.clear()
+    }
+
+    fun annotatedFor(pageParagraphs: List<ReaderPageParagraph>): AnnotatedString {
+        if (pageParagraphs.isEmpty()) return AnnotatedString("")
+        val page = pageFrom(pageParagraphs)
+        val text = page.text
+        return buildAnnotatedString {
+            append(text)
+            chapterDropInitialOffsets(page).forEach { offset ->
+                if (offset in text.indices) {
+                    addStyle(
+                        SpanStyle(
+                            fontSize = (fontSizeSp * 2).sp,
+                            fontWeight = FontWeight.Black,
+                        ),
+                        offset,
+                        offset + 1,
+                    )
+                }
+            }
+        }
+    }
+
+    fun fits(pageParagraphs: List<ReaderPageParagraph>): Boolean {
+        if (pageParagraphs.isEmpty()) return true
+        val layout = textMeasurer.measure(
+            text = annotatedFor(pageParagraphs),
+            style = textStyle,
+            constraints = Constraints(maxWidth = measuredWidth),
+        )
+        return layout.size.height <= measuredHeight
+    }
+
+    fun makeChunk(
+        paragraphIndex: Int,
+        paragraph: String,
+        sourceOffset: Int,
+        start: Int,
+        endExclusive: Int,
+        isChapterFirstParagraph: Boolean,
+    ): ReaderPageParagraph =
+        ReaderPageParagraph(
+            paragraphIndex = paragraphIndex,
+            text = paragraph.substring(start, endExclusive).trim(),
+            isChapterFirstParagraph = isChapterFirstParagraph,
+            startOffset = sourceOffset + start,
+            endOffsetExclusive = sourceOffset + endExclusive,
+        )
+
+    fun readableBreak(paragraph: String, start: Int, maxEndExclusive: Int): Int {
+        if (maxEndExclusive >= paragraph.length) return paragraph.length
+        val lowerBound = (start + ((maxEndExclusive - start) * 0.55f).toInt())
+            .coerceAtLeast(start + 1)
+        val sentenceBreak = (maxEndExclusive downTo lowerBound).firstOrNull { index ->
+            paragraph.getOrNull(index - 1)?.let { it == '.' || it == '!' || it == '?' || it == ';' || it == ':' } == true
+        }
+        if (sentenceBreak != null) return sentenceBreak
+        val wordBreak = (maxEndExclusive downTo lowerBound).firstOrNull { index ->
+            paragraph.getOrNull(index - 1)?.isWhitespace() == true
+        }
+        return wordBreak ?: maxEndExclusive
+    }
+
+    fun fittingEnd(
+        paragraphIndex: Int,
+        paragraph: String,
+        sourceOffset: Int,
+        start: Int,
+        isChapterFirstParagraph: Boolean,
+    ): Int {
+        var low = start + 1
+        var high = paragraph.length
+        var best = start
+        while (low <= high) {
+            val mid = (low + high) / 2
+            val candidate = makeChunk(
+                paragraphIndex = paragraphIndex,
+                paragraph = paragraph,
+                sourceOffset = sourceOffset,
+                start = start,
+                endExclusive = mid,
+                isChapterFirstParagraph = isChapterFirstParagraph,
+            )
+            if (candidate.text.isNotBlank() && fits(current + candidate)) {
+                best = mid
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
+        return if (best > start) readableBreak(paragraph, start, best) else start
+    }
+
+    paragraphs.forEachIndexed { paragraphIndex, rawParagraph ->
+        val bounds = rawParagraph.readerTrimmedBounds() ?: return@forEachIndexed
+        val paragraph = rawParagraph.substring(bounds.first, bounds.last + 1)
+        val isHeading = paragraphIndex in chapterParagraphIndices
+        val isBody = paragraph.isMeasuredReaderBodyParagraph(isHeading)
+        if (isHeading && current.isNotEmpty()) {
+            flushPage()
+        }
+        val isChapterFirstParagraph = isBody && shouldDropCapNextBody
+        if (isHeading) {
+            shouldDropCapNextBody = true
+        } else if (isChapterFirstParagraph) {
+            shouldDropCapNextBody = false
+        }
+
+        var start = 0
+        while (start < paragraph.length) {
+            while (start < paragraph.length && paragraph[start].isWhitespace()) start += 1
+            if (start >= paragraph.length) break
+
+            val fullChunk = makeChunk(
+                paragraphIndex = paragraphIndex,
+                paragraph = paragraph,
+                sourceOffset = bounds.first,
+                start = start,
+                endExclusive = paragraph.length,
+                isChapterFirstParagraph = isChapterFirstParagraph && start == 0,
+            )
+            if (fits(current + fullChunk)) {
+                current += fullChunk
+                start = paragraph.length
+                continue
+            }
+
+            val end = fittingEnd(
+                paragraphIndex = paragraphIndex,
+                paragraph = paragraph,
+                sourceOffset = bounds.first,
+                start = start,
+                isChapterFirstParagraph = isChapterFirstParagraph && start == 0,
+            )
+            if (end > start) {
+                current += makeChunk(
+                    paragraphIndex = paragraphIndex,
+                    paragraph = paragraph,
+                    sourceOffset = bounds.first,
+                    start = start,
+                    endExclusive = end,
+                    isChapterFirstParagraph = isChapterFirstParagraph && start == 0,
+                )
+                flushPage()
+                start = end
+            } else if (current.isNotEmpty()) {
+                flushPage()
+            } else {
+                val fallbackEnd = (start + 1).coerceAtMost(paragraph.length)
+                current += makeChunk(
+                    paragraphIndex = paragraphIndex,
+                    paragraph = paragraph,
+                    sourceOffset = bounds.first,
+                    start = start,
+                    endExclusive = fallbackEnd,
+                    isChapterFirstParagraph = isChapterFirstParagraph && start == 0,
+                )
+                flushPage()
+                start = fallbackEnd
+            }
+        }
+    }
+    flushPage()
+
+    return pages.ifEmpty {
+        buildReaderPages(paragraphs = paragraphs, chapterParagraphIndices = chapterParagraphIndices)
+    }
+}
+
+private fun String.readerTrimmedBounds(): IntRange? {
+    val first = indexOfFirst { !it.isWhitespace() }
+    if (first < 0) return null
+    val last = indexOfLast { !it.isWhitespace() }
+    return first..last
+}
+
+private fun String.isMeasuredReaderBodyParagraph(isHeading: Boolean): Boolean {
+    val normalized = trim()
+    if (isHeading || normalized.length < 32) return false
+    return normalized.count { it.isLetter() } >= 20
 }
 
 @Composable
