@@ -2997,6 +2997,21 @@ private fun ReaderPageAnchor.isAfter(other: ReaderPageAnchor): Boolean =
     paragraphIndex > other.paragraphIndex ||
         (paragraphIndex == other.paragraphIndex && paragraphOffset > other.paragraphOffset)
 
+private fun ReaderPageAnchor.compareToAnchor(other: ReaderPageAnchor): Int =
+    when {
+        paragraphIndex != other.paragraphIndex -> paragraphIndex.compareTo(other.paragraphIndex)
+        else -> paragraphOffset.compareTo(other.paragraphOffset)
+    }
+
+private fun ReaderPageAnchor.isBefore(other: ReaderPageAnchor): Boolean =
+    compareToAnchor(other) < 0
+
+private fun sortedReaderAnchors(
+    first: ReaderPageAnchor,
+    second: ReaderPageAnchor,
+): Pair<ReaderPageAnchor, ReaderPageAnchor> =
+    if (first.compareToAnchor(second) <= 0) first to second else second to first
+
 private fun List<ReaderPage>.findPageIndexForAnchor(anchor: ReaderPageAnchor): Int =
     indexOfFirst { page -> page.containsAnchor(anchor.paragraphIndex, anchor.paragraphOffset) }
         .takeIf { it >= 0 }
@@ -3155,9 +3170,9 @@ private fun ReaderScreen(
     var translationSourceText by remember(book.id) { mutableStateOf("") }
     var translationLoading by remember(book.id) { mutableStateOf(false) }
     var translationIsError by remember(book.id) { mutableStateOf(false) }
-    var selectionStart by remember(page.index) { mutableStateOf<Int?>(null) }
-    var selectionEnd by remember(page.index) { mutableStateOf<Int?>(null) }
-    var selectionTipVisible by remember(page.index) { mutableStateOf(false) }
+    var selectionStartAnchor by remember(book.id) { mutableStateOf<ReaderPageAnchor?>(null) }
+    var selectionEndAnchor by remember(book.id) { mutableStateOf<ReaderPageAnchor?>(null) }
+    var selectionTipVisible by remember(book.id) { mutableStateOf(false) }
     var wordSelectionRange by remember(page.index) { mutableStateOf<IntRange?>(null) }
     var noteReturnVisible by remember(book.id, returnNoteId) { mutableStateOf(returnNoteId != null) }
     var noteReturnStartPageIndex by remember(book.id, returnNoteId) { mutableStateOf<Int?>(null) }
@@ -3168,21 +3183,20 @@ private fun ReaderScreen(
     var ttsStatusText by remember { mutableStateOf("TTS 正在初始化") }
     var ttsAccent by rememberSaveable { mutableStateOf(TtsAccent.US) }
     var ttsVoices by remember { mutableStateOf<Map<TtsAccent, Voice?>>(emptyMap()) }
-    val selectionRange = remember(selectionStart, selectionEnd) {
-        val start = selectionStart
-        val end = selectionEnd
-        if (start == null || end == null || kotlin.math.abs(start - end) < 2) {
-            null
-        } else {
-            minOf(start, end)..maxOf(start, end)
-        }
+    val selectionRange = remember(page.index, page.text, selectionStartAnchor, selectionEndAnchor) {
+        page.visibleSelectionRange(selectionStartAnchor, selectionEndAnchor)
     }
-    val selectedText = remember(page.text, selectionRange) {
-        selectionRange
-            ?.let { range ->
-                page.text.substring(range.first, (range.last + 1).coerceAtMost(page.text.length)).trim()
-            }
-            .orEmpty()
+    val selectedText = remember(book.paragraphs, selectionStartAnchor, selectionEndAnchor) {
+        book.paragraphs.selectedTextForAnchors(selectionStartAnchor, selectionEndAnchor)
+    }
+    val selectedStartParagraphIndex = remember(selectionStartAnchor, selectionEndAnchor, page.firstParagraphIndex) {
+        val first = selectionStartAnchor
+        val second = selectionEndAnchor
+        if (first != null && second != null) {
+            sortedReaderAnchors(first, second).first.paragraphIndex
+        } else {
+            page.firstParagraphIndex
+        }
     }
 
     DisposableEffect(context) {
@@ -3402,11 +3416,12 @@ private fun ReaderScreen(
         translationText = null
         translationLoading = false
         translationIsError = false
-        selectionStart = null
-        selectionEnd = null
+        selectionStartAnchor = null
+        selectionEndAnchor = null
+        selectionTipVisible = false
     }
 
-    fun goToPage(nextIndex: Int) {
+    fun goToPage(nextIndex: Int, clearOverlays: Boolean = true) {
         val boundedIndex = nextIndex.coerceIn(0, pages.lastIndex)
         val nextPage = pages[boundedIndex]
         pageIndex = boundedIndex
@@ -3414,7 +3429,7 @@ private fun ReaderScreen(
         pageAnchor = nextAnchor
         savedAnchorParagraph = nextAnchor.paragraphIndex
         savedAnchorOffset = nextAnchor.paragraphOffset
-        clearReaderOverlays()
+        if (clearOverlays) clearReaderOverlays()
     }
 
     fun goToAnchor(anchor: ReaderPageAnchor) {
@@ -3436,6 +3451,23 @@ private fun ReaderScreen(
 
     fun goNextPage() {
         if (pageIndex < pages.lastIndex) goToPage(pageIndex + 1)
+    }
+
+    fun extendSelectionAcrossPage(forward: Boolean) {
+        val nextIndex = if (forward) pageIndex + 1 else pageIndex - 1
+        if (nextIndex !in pages.indices) return
+        val nextPage = pages[nextIndex]
+        goToPage(nextIndex, clearOverlays = false)
+        val endpoint = if (forward) {
+            nextPage.anchorForDisplayOffset(0)
+        } else {
+            nextPage.anchorForDisplayOffset(nextPage.text.lastIndex.coerceAtLeast(0))
+        }
+        selectionEndAnchor = endpoint
+        selectionTipVisible = false
+        wordLookupSerial += 1
+        wordStack = emptyList()
+        wordSelectionRange = null
     }
 
     DisposableEffect(book.id, pageIndex, pages.size) {
@@ -3704,17 +3736,19 @@ private fun ReaderScreen(
                 onOpenChat = onOpenChat,
                 onOpenPageSettings = { pageSettingsOpen = true },
                 onWordLongPress = { word, paragraphIndex, wordRange ->
-                    selectionStart = null
-                    selectionEnd = null
+                    selectionStartAnchor = null
+                    selectionEndAnchor = null
+                    selectionTipVisible = false
                     wordSelectionRange = wordRange
                     lookupWord(word, paragraphIndex, replaceStack = true)
                 },
                 onSelectionChange = { start, end ->
-                    selectionStart = start
-                    selectionEnd = end
+                    selectionStartAnchor = start
+                    selectionEndAnchor = end
                     selectionTipVisible = true
                     clearWordLookup()
                 },
+                onSelectionPageTurn = { forward -> extendSelectionAcrossPage(forward) },
                 selectionTipVisible = selectionTipVisible,
                 onSelectionTap = { selectionTipVisible = true },
                 selectedText = selectedText,
@@ -3734,7 +3768,7 @@ private fun ReaderScreen(
                                 translationText = it
                                 translationIsError = false
                                 onAddLookupHistory(
-                                    page.paragraphIndexForDisplayOffset(selectionRange?.first ?: 0),
+                                    selectedStartParagraphIndex,
                                     LookupHistoryType.TRANSLATION,
                                     selectedText,
                                     it,
@@ -3751,7 +3785,7 @@ private fun ReaderScreen(
                 onHighlightSelection = {
                     if (selectedText.isNotBlank()) {
                         val note = onAddNote(
-                            page.paragraphIndexForDisplayOffset(selectionRange?.first ?: 0),
+                            selectedStartParagraphIndex,
                             selectedText,
                             "",
                             "",
@@ -3779,13 +3813,13 @@ private fun ReaderScreen(
                 onChatSelection = {
                     if (selectedText.isNotBlank()) {
                         chatSelectionText = selectedText
-                        chatSelectionParagraphIndex = page.paragraphIndexForDisplayOffset(selectionRange?.first ?: 0)
+                        chatSelectionParagraphIndex = selectedStartParagraphIndex
                         selectionTipVisible = false
                     }
                 },
                 onClearSelection = {
-                    selectionStart = null
-                    selectionEnd = null
+                    selectionStartAnchor = null
+                    selectionEndAnchor = null
                     selectionTipVisible = false
                 },
             )
@@ -3849,7 +3883,7 @@ private fun ReaderScreen(
             onSave = { sentences, translationText, noteText ->
                 val savedNoteIds = sentences.mapNotNull { sentence ->
                     onAddNote(
-                        page.paragraphIndexForDisplayOffset(selectionRange?.first ?: 0),
+                        selectedStartParagraphIndex,
                         sentence,
                         translationText,
                         noteText,
@@ -3904,7 +3938,8 @@ private fun ReaderPageSurface(
     onOpenChat: () -> Unit,
     onOpenPageSettings: () -> Unit,
     onWordLongPress: (String, Int, IntRange?) -> Unit,
-    onSelectionChange: (Int, Int) -> Unit,
+    onSelectionChange: (ReaderPageAnchor, ReaderPageAnchor) -> Unit,
+    onSelectionPageTurn: (Boolean) -> Unit,
     onSelectionTap: () -> Unit,
     onTranslateSelection: () -> Unit,
     onHighlightSelection: () -> Unit,
@@ -3917,6 +3952,14 @@ private fun ReaderPageSurface(
     var controlsVisibleEpoch by remember { mutableStateOf(0) }
     val titleTapHeight = with(LocalDensity.current) { 52.dp.toPx() }
     val fontFamily = settings.font.toFontFamily()
+    val currentPageState = rememberUpdatedState(page)
+    val currentLayoutResultState = rememberUpdatedState(layoutResult)
+    val currentSelectedTextState = rememberUpdatedState(selectedText)
+    val currentSelectionRangeState = rememberUpdatedState(selectionRange)
+    val currentOnWordLongPress = rememberUpdatedState(onWordLongPress)
+    val currentOnSelectionTap = rememberUpdatedState(onSelectionTap)
+    val currentOnSelectionChange = rememberUpdatedState(onSelectionChange)
+    val currentOnSelectionPageTurn = rememberUpdatedState(onSelectionPageTurn)
     val annotatedText = readerPageAnnotatedString(
         page = page,
         settings = settings,
@@ -3997,17 +4040,25 @@ private fun ReaderPageSurface(
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .pointerInput(page.text) {
+                        .pointerInput(Unit) {
                             detectReaderTextGestures(
-                                text = page.text,
-                                getLayoutResult = { layoutResult },
-                                canLookupWord = { selectedText.isBlank() },
-                                currentSelectionRange = { selectionRange },
-                                onWordLongPress = onWordLongPress,
-                                paragraphIndexForOffset = { page.paragraphIndexForDisplayOffset(it) },
-                                onSelectionTap = onSelectionTap,
+                                getText = { currentPageState.value.text },
+                                getLayoutResult = { currentLayoutResultState.value },
+                                canLookupWord = { currentSelectedTextState.value.isBlank() },
+                                currentSelectionRange = { currentSelectionRangeState.value },
+                                onWordLongPress = { word, offset, wordRange ->
+                                    val currentPage = currentPageState.value
+                                    currentOnWordLongPress.value(
+                                        word,
+                                        currentPage.paragraphIndexForDisplayOffset(offset),
+                                        wordRange,
+                                    )
+                                },
+                                offsetToAnchor = { offset -> currentPageState.value.anchorForDisplayOffset(offset) },
+                                onSelectionTap = { currentOnSelectionTap.value() },
                                 onSelectionGestureStart = {},
-                                onSelectionChange = onSelectionChange,
+                                onSelectionChange = { start, end -> currentOnSelectionChange.value(start, end) },
+                                onSelectionPageTurn = { forward -> currentOnSelectionPageTurn.value(forward) },
                                 onSelectionGestureEnd = {},
                             )
                         },
@@ -4018,7 +4069,9 @@ private fun ReaderPageSurface(
                     text = page.text,
                     layoutResult = layoutResult,
                     selectionRange = selectionRange,
-                    onSelectionChange = onSelectionChange,
+                    onSelectionChange = { start, end ->
+                        onSelectionChange(page.anchorForDisplayOffset(start), page.anchorForDisplayOffset(end))
+                    },
                 )
 
                 if (selectedText.isNotBlank() && selectionTipVisible) {
@@ -4060,7 +4113,7 @@ private fun estimateReaderPageCharBudget(
     val availableHeight = (screenHeightDp - 132).coerceAtLeast(360)
     val estimatedLines = (availableHeight / lineHeight).toInt().coerceAtLeast(8)
     val estimatedCharsPerLine = (textWidth / (fontSizeSp * 0.56f)).toInt().coerceAtLeast(18)
-    return (estimatedLines * estimatedCharsPerLine * 0.82f).toInt().coerceIn(360, 780)
+    return (estimatedLines * estimatedCharsPerLine * 0.78f).toInt().coerceIn(420, 1_680)
 }
 
 @Composable
@@ -4205,29 +4258,33 @@ private suspend fun PointerInputScope.detectReaderPageTapGestures(
 }
 
 private suspend fun PointerInputScope.detectReaderTextGestures(
-    text: String,
+    getText: () -> String,
     getLayoutResult: () -> TextLayoutResult?,
     canLookupWord: () -> Boolean,
     currentSelectionRange: () -> IntRange?,
     onWordLongPress: (String, Int, IntRange?) -> Unit,
-    paragraphIndexForOffset: (Int) -> Int,
+    offsetToAnchor: (Int) -> ReaderPageAnchor,
     onSelectionTap: () -> Unit,
     onSelectionGestureStart: () -> Unit,
-    onSelectionChange: (Int, Int) -> Unit,
+    onSelectionChange: (ReaderPageAnchor, ReaderPageAnchor) -> Unit,
+    onSelectionPageTurn: (Boolean) -> Unit,
     onSelectionGestureEnd: () -> Unit,
 ) {
     awaitEachGesture {
         val firstDown = awaitFirstDown(requireUnconsumed = false)
+        val text = getText()
         val layout = getLayoutResult() ?: return@awaitEachGesture
         val longPressOffset = layout.getOffsetForPosition(firstDown.position)
         val word = extractWordAt(text, longPressOffset)
         val wordRange = wordRangeAt(text, longPressOffset)
-        val paragraphRange = paragraphRangeAt(text, longPressOffset)
-        val sentenceRange = sentenceRangeAt(text, longPressOffset) ?: paragraphRange
+        val selectionSeedRange = wordRange ?: (longPressOffset.coerceIn(0, text.lastIndex.coerceAtLeast(0))).let { it..it }
+        val selectionSeedStart = offsetToAnchor(selectionSeedRange.first)
+        val selectionSeedEnd = offsetToAnchor(selectionSeedRange.last)
         val pointerId = firstDown.id
         var selecting = false
         var wordLookupTriggered = false
         var pointerUp = false
+        var lastPageTurnAt = 0L
 
         try {
             currentSelectionRange()?.let { activeRange ->
@@ -4260,19 +4317,22 @@ private suspend fun PointerInputScope.detectReaderTextGestures(
                     if (change.positionChangedIgnoreConsumed()) {
                         val movedEnough = (change.position - firstDown.position).getDistance() >
                             viewConfiguration.touchSlop
-                        if (!movedEnough || sentenceRange == null) continue
+                        if (!movedEnough) continue
                         selecting = true
                         firstDown.consume()
                         change.consume()
                         onSelectionGestureStart()
-                        onSelectionChange(sentenceRange.first, sentenceRange.last)
-                        val currentOffset = (getLayoutResult() ?: layout).getOffsetForPosition(change.position)
-                        val anchorOffset = if (currentOffset < sentenceRange.first) {
-                            sentenceRange.last
+                        onSelectionChange(selectionSeedStart, selectionSeedEnd)
+                        val currentText = getText()
+                        val currentLayout = getLayoutResult() ?: layout
+                        val currentOffset = currentLayout.getOffsetForPosition(change.position)
+                            .coerceIn(0, currentText.lastIndex.coerceAtLeast(0))
+                        val currentRange = wordRangeAt(currentText, currentOffset) ?: (currentOffset..currentOffset)
+                        if (offsetToAnchor(currentOffset).isBefore(selectionSeedStart)) {
+                            onSelectionChange(offsetToAnchor(currentRange.first), selectionSeedEnd)
                         } else {
-                            sentenceRange.first
+                            onSelectionChange(selectionSeedStart, offsetToAnchor(currentRange.last))
                         }
-                        onSelectionChange(anchorOffset, currentOffset)
                         return@withTimeoutOrNull
                     }
                 }
@@ -4283,7 +4343,7 @@ private suspend fun PointerInputScope.detectReaderTextGestures(
             if (!selecting && word != null && canLookupWord()) {
                 firstDown.consume()
                 wordLookupTriggered = true
-                onWordLongPress(word, paragraphIndexForOffset(longPressOffset), wordRange)
+                onWordLongPress(word, offsetToAnchor(longPressOffset).paragraphIndex, wordRange)
             }
 
             while (true) {
@@ -4299,24 +4359,36 @@ private suspend fun PointerInputScope.detectReaderTextGestures(
                     change.consume()
                     continue
                 }
-                    if (change.positionChangedIgnoreConsumed()) {
-                        val currentLayout = getLayoutResult() ?: continue
-                        if (!selecting) {
-                            val movedEnough = (change.position - firstDown.position).getDistance() >
-                                viewConfiguration.touchSlop
-                            if (!movedEnough || sentenceRange == null) continue
-                            selecting = true
-                            onSelectionGestureStart()
-                            onSelectionChange(sentenceRange.first, sentenceRange.last)
-                        }
-                        val currentOffset = currentLayout.getOffsetForPosition(change.position)
-                        val activeSentenceRange = sentenceRange ?: continue
-                        val anchorOffset = if (currentOffset < activeSentenceRange.first) {
-                            activeSentenceRange.last
-                        } else {
-                            activeSentenceRange.first
-                        }
-                        onSelectionChange(anchorOffset, currentOffset)
+                if (change.positionChangedIgnoreConsumed()) {
+                    val currentLayout = getLayoutResult() ?: continue
+                    val currentText = getText()
+                    if (!selecting) {
+                        val movedEnough = (change.position - firstDown.position).getDistance() >
+                            viewConfiguration.touchSlop
+                        if (!movedEnough) continue
+                        selecting = true
+                        onSelectionGestureStart()
+                        onSelectionChange(selectionSeedStart, selectionSeedEnd)
+                    }
+                    val now = System.currentTimeMillis()
+                    val shouldTurnForward = change.position.x > size.width * 0.82f &&
+                        change.position.y > size.height * 0.74f
+                    val shouldTurnBackward = change.position.x < size.width * 0.18f &&
+                        change.position.y < size.height * 0.26f
+                    if ((shouldTurnForward || shouldTurnBackward) && now - lastPageTurnAt > 650L) {
+                        lastPageTurnAt = now
+                        onSelectionPageTurn(shouldTurnForward)
+                        change.consume()
+                        continue
+                    }
+                    val currentOffset = currentLayout.getOffsetForPosition(change.position)
+                        .coerceIn(0, currentText.lastIndex.coerceAtLeast(0))
+                    val currentRange = wordRangeAt(currentText, currentOffset) ?: (currentOffset..currentOffset)
+                    if (offsetToAnchor(currentOffset).isBefore(selectionSeedStart)) {
+                        onSelectionChange(offsetToAnchor(currentRange.first), selectionSeedEnd)
+                    } else {
+                        onSelectionChange(selectionSeedStart, offsetToAnchor(currentRange.last))
+                    }
                     change.consume()
                 }
             }
@@ -4408,6 +4480,90 @@ private fun ReaderPage.paragraphIndexForDisplayOffset(offset: Int): Int {
         cursor = endExclusive + 2
     }
     return paragraphs.last().paragraphIndex
+}
+
+private fun ReaderPage.anchorForDisplayOffset(offset: Int): ReaderPageAnchor {
+    if (paragraphs.isEmpty()) return ReaderPageAnchor(firstParagraphIndex, firstParagraphOffset)
+    val anchor = offset.coerceIn(0, text.lastIndex.coerceAtLeast(0))
+    var cursor = 0
+    paragraphs.forEach { paragraph ->
+        val start = cursor
+        val endExclusive = start + paragraph.text.length
+        if (anchor <= endExclusive) {
+            val paragraphOffset = paragraph.startOffset + (anchor - start).coerceIn(0, paragraph.text.length)
+            return ReaderPageAnchor(paragraph.paragraphIndex, paragraphOffset.coerceAtMost((paragraph.endOffsetExclusive - 1).coerceAtLeast(paragraph.startOffset)))
+        }
+        cursor = endExclusive + 2
+    }
+    val last = paragraphs.last()
+    return ReaderPageAnchor(last.paragraphIndex, (last.endOffsetExclusive - 1).coerceAtLeast(last.startOffset))
+}
+
+private fun ReaderPage.displayOffsetForAnchor(anchor: ReaderPageAnchor): Int? {
+    var cursor = 0
+    paragraphs.forEach { paragraph ->
+        val start = cursor
+        val endExclusive = start + paragraph.text.length
+        if (anchor.paragraphIndex == paragraph.paragraphIndex &&
+            anchor.paragraphOffset in paragraph.startOffset until paragraph.endOffsetExclusive
+        ) {
+            return start + (anchor.paragraphOffset - paragraph.startOffset).coerceIn(0, paragraph.text.length)
+        }
+        cursor = endExclusive + 2
+    }
+    return null
+}
+
+private fun ReaderPage.visibleSelectionRange(
+    startAnchor: ReaderPageAnchor?,
+    endAnchor: ReaderPageAnchor?,
+): IntRange? {
+    val firstAnchor = startAnchor ?: return null
+    val secondAnchor = endAnchor ?: return null
+    if (paragraphs.isEmpty() || text.isBlank()) return null
+    val (selectionStart, selectionEnd) = sortedReaderAnchors(firstAnchor, secondAnchor)
+    val pageStart = paragraphs.first().let { ReaderPageAnchor(it.paragraphIndex, it.startOffset) }
+    val pageEnd = paragraphs.last().let { ReaderPageAnchor(it.paragraphIndex, (it.endOffsetExclusive - 1).coerceAtLeast(it.startOffset)) }
+    if (selectionEnd.isBefore(pageStart) || pageEnd.isBefore(selectionStart)) return null
+    val start = if (selectionStart.isBefore(pageStart)) {
+        0
+    } else {
+        displayOffsetForAnchor(selectionStart) ?: 0
+    }
+    val end = if (pageEnd.isBefore(selectionEnd)) {
+        text.lastIndex
+    } else {
+        displayOffsetForAnchor(selectionEnd) ?: text.lastIndex
+    }
+    return (start.coerceIn(0, text.lastIndex)..end.coerceIn(0, text.lastIndex))
+        .takeIf { it.last - it.first >= 1 }
+}
+
+private fun List<String>.selectedTextForAnchors(
+    startAnchor: ReaderPageAnchor?,
+    endAnchor: ReaderPageAnchor?,
+): String {
+    val firstAnchor = startAnchor ?: return ""
+    val secondAnchor = endAnchor ?: return ""
+    val (selectionStart, selectionEnd) = sortedReaderAnchors(firstAnchor, secondAnchor)
+    if (selectionStart == selectionEnd) return ""
+    return buildList {
+        for (paragraphIndex in selectionStart.paragraphIndex..selectionEnd.paragraphIndex) {
+            val paragraph = this@selectedTextForAnchors.getOrNull(paragraphIndex).orEmpty()
+            if (paragraph.isBlank()) continue
+            val start = if (paragraphIndex == selectionStart.paragraphIndex) {
+                selectionStart.paragraphOffset.coerceIn(0, paragraph.lastIndex.coerceAtLeast(0))
+            } else {
+                0
+            }
+            val endExclusive = if (paragraphIndex == selectionEnd.paragraphIndex) {
+                (selectionEnd.paragraphOffset + 1).coerceIn(start, paragraph.length)
+            } else {
+                paragraph.length
+            }
+            paragraph.substring(start, endExclusive).trim().takeIf { it.isNotBlank() }?.let { add(it) }
+        }
+    }.joinToString("\n\n")
 }
 
 private fun List<ReaderPage>.findPageIndexForHighlight(request: ReaderHighlightRequest): Int {
