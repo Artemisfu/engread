@@ -67,7 +67,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
-import androidx.compose.material.icons.automirrored.filled.KeyboardReturn
 import androidx.compose.material.icons.automirrored.filled.Notes
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
@@ -4624,7 +4623,7 @@ private fun NoteReturnChip(
         modifier = modifier,
     ) {
         Icon(
-            imageVector = Icons.AutoMirrored.Filled.KeyboardReturn,
+            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
             contentDescription = "返回笔记",
             tint = MaterialTheme.colorScheme.primary,
             modifier = Modifier
