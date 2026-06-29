@@ -96,7 +96,6 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedButton
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -1241,7 +1240,6 @@ private fun ChatScreen(
     var wordStack by remember(selectedBookId) { mutableStateOf<List<WordEntry>>(emptyList()) }
     var wordLookupSerial by remember(selectedBookId) { mutableStateOf(0) }
     var ttsAccent by rememberSaveable { mutableStateOf(TtsAccent.US) }
-    var tocMenuOpen by rememberSaveable(selectedBookId) { mutableStateOf(false) }
     val showLatestButton = selectedBook != null && messages.isNotEmpty() && listState.canScrollForward
 
     fun refreshLocalSuggestions() {
@@ -1387,20 +1385,27 @@ private fun ChatScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 2.dp),
+                            .padding(horizontal = 12.dp, vertical = 1.dp),
                         horizontalArrangement = Arrangement.End,
                     ) {
-                        FilledTonalButton(
-                            onClick = {
-                                scope.launch {
-                                    val target = listState.layoutInfo.totalItemsCount - 1
-                                    if (target >= 0) listState.scrollToItem(target)
-                                }
-                            },
-                            shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.78f),
+                            modifier = Modifier
+                                .heightIn(min = 24.dp)
+                                .clickable {
+                                    scope.launch {
+                                        val target = listState.layoutInfo.totalItemsCount - 1
+                                        if (target >= 0) listState.scrollToItem(target)
+                                    }
+                                },
                         ) {
-                            Text("看最新")
+                            Text(
+                                text = "看最新",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp),
+                            )
                         }
                     }
                 }
@@ -1446,53 +1451,16 @@ private fun ChatScreen(
                     selectedBook = selectedBook,
                     bookChats = bookChats,
                     onSelect = { selectedBookId = it.id },
+                    onContinueRead = {
+                        selectedBook?.let { book -> onOpenReader(book, null) }
+                    },
                 )
-                selectedBook?.let { book ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        AssistChip(
-                            onClick = { tocMenuOpen = true },
-                            label = { Text("目录定位") },
-                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.Notes, contentDescription = null) },
-                        )
-                        AssistChip(
-                            onClick = { onOpenReader(book, null) },
-                            label = { Text("继续读") },
-                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null) },
-                        )
-                    }
-                    DropdownMenu(
-                        expanded = tocMenuOpen,
-                        onDismissRequest = { tocMenuOpen = false },
-                    ) {
-                        book.readerChapters().take(80).forEach { chapter ->
-                            DropdownMenuItem(
-                                text = {
-                                    Text(
-                                        text = chapter.title,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                },
-                                onClick = {
-                                    tocMenuOpen = false
-                                    onOpenReader(book, chapter.paragraphIndex)
-                                },
-                            )
-                        }
-                    }
-                }
                 LazyColumn(
                     state = listState,
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     if (messages.isEmpty()) {
@@ -1539,51 +1507,67 @@ private fun ChatScreen(
         }
     }
 }
-
 @Composable
 private fun BookChatSelector(
     books: List<Book>,
     selectedBook: Book?,
     bookChats: List<BookChat>,
     onSelect: (Book) -> Unit,
+    onContinueRead: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
-    Box(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
+            .padding(horizontal = 16.dp, vertical = 5.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        AssistChip(
-            onClick = { menuOpen = true },
-            label = {
-                Text(
-                    text = selectedBook?.title ?: "选择书籍",
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            },
-            leadingIcon = { Icon(Icons.Filled.AutoStories, contentDescription = null) },
-        )
-        DropdownMenu(
-            expanded = menuOpen,
-            onDismissRequest = { menuOpen = false },
-        ) {
-            books.forEach { book ->
-                val hasChat = bookChats.any { it.bookId == book.id && it.messages.isNotEmpty() }
-                DropdownMenuItem(
-                    text = {
-                        Text(
-                            text = if (hasChat) "${book.title} · 有对话" else book.title,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    },
-                    onClick = {
-                        menuOpen = false
-                        onSelect(book)
-                    },
-                )
+        Box(modifier = Modifier.weight(1f)) {
+            AssistChip(
+                onClick = { menuOpen = true },
+                label = {
+                    Text(
+                        text = selectedBook?.title ?: "选择书籍",
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+                leadingIcon = { Icon(Icons.Filled.AutoStories, contentDescription = null) },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            DropdownMenu(
+                expanded = menuOpen,
+                onDismissRequest = { menuOpen = false },
+            ) {
+                books.forEach { book ->
+                    val hasChat = bookChats.any { it.bookId == book.id && it.messages.isNotEmpty() }
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                text = if (hasChat) "${book.title} · 有对话" else book.title,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        },
+                        onClick = {
+                            menuOpen = false
+                            onSelect(book)
+                        },
+                    )
+                }
             }
+        }
+        IconButton(
+            onClick = onContinueRead,
+            enabled = selectedBook != null,
+            modifier = Modifier.size(40.dp),
+        ) {
+            Icon(
+                Icons.Filled.PlayArrow,
+                contentDescription = "继续读",
+                tint = if (selectedBook != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
