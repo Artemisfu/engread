@@ -21,6 +21,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -371,6 +372,12 @@ private data class UndoNotice(
     val onAction: suspend () -> Unit,
 )
 
+private data class ReaderHighlightRequest(
+    val paragraphIndex: Int,
+    val text: String = "",
+    val token: String = UUID.randomUUID().toString(),
+)
+
 @Composable
 private fun EngReadApp() {
     val context = LocalContext.current
@@ -391,6 +398,7 @@ private fun EngReadApp() {
     var preferredChatBookId by rememberSaveable { mutableStateOf("") }
     var readerReturnNoteId by rememberSaveable { mutableStateOf<String?>(null) }
     var notesScrollTargetId by rememberSaveable { mutableStateOf<String?>(null) }
+    var readerHighlightRequest by remember { mutableStateOf<ReaderHighlightRequest?>(null) }
     var chatSuggestionsByBook by remember { mutableStateOf<Map<String, List<String>>>(emptyMap()) }
     var undoNotices by remember { mutableStateOf<List<UndoNotice>>(emptyList()) }
     var lastHomeBackAt by remember { mutableStateOf(0L) }
@@ -426,7 +434,12 @@ private fun EngReadApp() {
         undoNotices = undoNotices.filterNot { it.id == id }
     }
 
-    fun openReader(book: Book, paragraphIndex: Int?, returnNoteId: String? = null) {
+    fun openReader(
+        book: Book,
+        paragraphIndex: Int?,
+        returnNoteId: String? = null,
+        highlightText: String? = null,
+    ) {
         val targetParagraph = paragraphIndex?.coerceIn(0, (book.paragraphs.size - 1).coerceAtLeast(0))
         if (targetParagraph != null) {
             val now = System.currentTimeMillis()
@@ -440,6 +453,9 @@ private fun EngReadApp() {
             scope.launch(Dispatchers.IO) {
                 repository.updateProgress(book.id, targetParagraph)
             }
+        }
+        readerHighlightRequest = targetParagraph?.let {
+            ReaderHighlightRequest(paragraphIndex = it, text = highlightText.orEmpty())
         }
         readerReturnNoteId = returnNoteId
         screen = AppScreen.Reader(book.id)
@@ -867,6 +883,12 @@ private fun EngReadApp() {
                         },
                         returnNoteId = readerReturnNoteId,
                         onReturnToNote = { noteId -> returnToNote(noteId) },
+                        highlightRequest = readerHighlightRequest,
+                        onHighlightConsumed = { request ->
+                            if (readerHighlightRequest?.token == request.token) {
+                                readerHighlightRequest = null
+                            }
+                        },
                     )
                 }
 
@@ -947,9 +969,9 @@ private fun EngReadApp() {
                             openReader(book, paragraphIndex)
                         } ?: showMessage("找不到原书")
                     },
-                    onOpenNoteSource = { noteId, bookId, paragraphIndex ->
+                    onOpenNoteSource = { noteId, bookId, paragraphIndex, highlightText ->
                         books.firstOrNull { it.id == bookId }?.let { book ->
-                            openReader(book, paragraphIndex, noteId)
+                            openReader(book, paragraphIndex, noteId, highlightText)
                         } ?: showMessage("找不到原书")
                     },
                     onScrollTargetConsumed = {
@@ -980,7 +1002,7 @@ private fun EngReadApp() {
                     onAddChatNote = { book, userMessage, assistantMessage ->
                         addChatTurnToNotes(book, userMessage, assistantMessage)
                     },
-                    onOpenReader = { book, paragraphIndex -> openReader(book, paragraphIndex) },
+                    onOpenReader = { book, paragraphIndex, highlightText -> openReader(book, paragraphIndex, highlightText = highlightText) },
                     onAddLookupHistory = { activeBook, paragraphIndex, type, sourceText, resultText, phonetic ->
                         scope.launch(Dispatchers.IO) {
                             repository.addLookupHistory(
@@ -1378,7 +1400,7 @@ private fun ChatScreen(
     onRefreshSuggestions: (Book, Boolean) -> Unit,
     onClearChat: (Book) -> Unit,
     onAddChatNote: (Book, ChatMessage, ChatMessage) -> Unit,
-    onOpenReader: (Book, Int?) -> Unit,
+    onOpenReader: (Book, Int?, String?) -> Unit,
     onAddLookupHistory: (Book, Int, LookupHistoryType, String, String, String) -> Unit,
 ) {
     var selectedBookId by rememberSaveable { mutableStateOf("") }
@@ -1607,7 +1629,7 @@ private fun ChatScreen(
                         bookChats = bookChats,
                         onSelect = { selectedBookId = it.id },
                         onContinueRead = {
-                            selectedBook?.let { book -> onOpenReader(book, null) }
+                            selectedBook?.let { book -> onOpenReader(book, null, null) }
                         },
                         onClearChat = { clearChatConfirmOpen = true },
                         clearChatEnabled = canClearChat,
@@ -1629,8 +1651,8 @@ private fun ChatScreen(
                             ChatMessageBubble(
                                 message = message,
                                 onLookupWord = { lookupChatWord(it) },
-                                onOpenAnchor = { paragraphIndex ->
-                                    selectedBook?.let { onOpenReader(it, paragraphIndex) }
+                                onOpenAnchor = { paragraphIndex, anchorText ->
+                                    selectedBook?.let { onOpenReader(it, paragraphIndex, anchorText) }
                                 },
                                 onAddNote = selectedBook?.let { book ->
                                     messages.chatTurnForMessage(message)?.let { turn ->
@@ -1898,7 +1920,7 @@ private fun ChatSuggestionsPanel(
 private fun ChatMessageBubble(
     message: ChatMessage,
     onLookupWord: (String) -> Unit,
-    onOpenAnchor: (Int) -> Unit,
+    onOpenAnchor: (Int, String?) -> Unit,
     onAddNote: (() -> Unit)?,
 ) {
     val fromUser = message.role == ChatRole.USER
@@ -2120,7 +2142,7 @@ private fun MarkdownText(
     markdown: String,
     color: Color,
     onLookupWord: (String) -> Unit = {},
-    onOpenAnchor: (Int) -> Unit = {},
+    onOpenAnchor: (Int, String?) -> Unit = { _, _ -> },
 ) {
     val document = remember(markdown) { chatMarkdownParser.parse(markdown.trim()) }
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -2142,7 +2164,7 @@ private fun MarkdownInlineText(
     fontWeight: FontWeight? = null,
     textAlign: TextAlign? = null,
     onLookupWord: (String) -> Unit,
-    onOpenAnchor: (Int) -> Unit = {},
+    onOpenAnchor: (Int, String?) -> Unit = { _, _ -> },
 ) {
     var layoutResult by remember(annotated.text) { mutableStateOf<TextLayoutResult?>(null) }
     Text(
@@ -2155,13 +2177,16 @@ private fun MarkdownInlineText(
             detectTapGestures(
                 onTap = { position ->
                     val offset = layoutResult?.getOffsetForPosition(position) ?: return@detectTapGestures
-                    val paragraphIndex = annotated
+                    val anchor = annotated
                         .getStringAnnotations(ChatAnchorAnnotation, offset, offset)
                         .firstOrNull()
                         ?.item
-                        ?.toIntOrNull()
                         ?: return@detectTapGestures
-                    onOpenAnchor(paragraphIndex)
+                    val paragraphIndex = anchor.substringBefore('\n').toIntOrNull()
+                        ?: return@detectTapGestures
+                    val anchorText = anchor.substringAfter('\n', missingDelimiterValue = "")
+                        .takeIf { it.isNotBlank() }
+                    onOpenAnchor(paragraphIndex, anchorText)
                 },
                 onLongPress = { position ->
                     val offset = layoutResult?.getOffsetForPosition(position) ?: return@detectTapGestures
@@ -2179,7 +2204,7 @@ private fun MarkdownNodeChildren(
     parent: Node,
     color: Color,
     onLookupWord: (String) -> Unit,
-    onOpenAnchor: (Int) -> Unit,
+    onOpenAnchor: (Int, String?) -> Unit,
 ) {
     parent.childNodes().forEach { child ->
         MarkdownBlockNode(
@@ -2196,7 +2221,7 @@ private fun MarkdownBlockNode(
     node: Node,
     color: Color,
     onLookupWord: (String) -> Unit,
-    onOpenAnchor: (Int) -> Unit,
+    onOpenAnchor: (Int, String?) -> Unit,
 ) {
     when (node) {
         is Paragraph -> {
@@ -2301,7 +2326,7 @@ private fun MarkdownListBlock(
     list: Node,
     color: Color,
     onLookupWord: (String) -> Unit,
-    onOpenAnchor: (Int) -> Unit,
+    onOpenAnchor: (Int, String?) -> Unit,
 ) {
     val startNumber = (list as? OrderedList)?.markerStartNumber ?: 1
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -2335,7 +2360,7 @@ private fun MarkdownTableBlock(
     table: TableBlock,
     color: Color,
     onLookupWord: (String) -> Unit,
-    onOpenAnchor: (Int) -> Unit,
+    onOpenAnchor: (Int, String?) -> Unit,
 ) {
     val rows = remember(table) { table.toMarkdownRows() }
     val columnCount = (rows.maxOfOrNull { it.size } ?: 0).coerceAtLeast(1)
@@ -2367,7 +2392,7 @@ private fun MarkdownTableRow(
     columnCount: Int,
     color: Color,
     onLookupWord: (String) -> Unit,
-    onOpenAnchor: (Int) -> Unit,
+    onOpenAnchor: (Int, String?) -> Unit,
 ) {
     Row(modifier = Modifier.height(IntrinsicSize.Min)) {
         repeat(columnCount) { index ->
@@ -2459,7 +2484,8 @@ private fun AnnotatedString.Builder.appendMarkdownInline(node: Node) {
         is Link -> {
             val paragraphIndex = node.destination.toEngReadParagraphIndex()
             if (paragraphIndex != null) {
-                pushStringAnnotation(ChatAnchorAnnotation, paragraphIndex.toString())
+                val anchorText = markdownInlineFromChildren(node).text.normalizedForQuoteMatch()
+                pushStringAnnotation(ChatAnchorAnnotation, "$paragraphIndex\n$anchorText")
             }
             pushStyle(
                 SpanStyle(
@@ -2979,6 +3005,8 @@ private fun ReaderScreen(
     onAddLookupHistory: (paragraphIndex: Int, LookupHistoryType, sourceText: String, resultText: String, phonetic: String) -> Unit,
     returnNoteId: String?,
     onReturnToNote: (String) -> Unit,
+    highlightRequest: ReaderHighlightRequest?,
+    onHighlightConsumed: (ReaderHighlightRequest) -> Unit,
 ) {
     if (book == null) {
         MissingBookScreen(modifier = modifier, onBack = onBack)
@@ -3059,6 +3087,8 @@ private fun ReaderScreen(
     var wordSelectionRange by remember(page.index) { mutableStateOf<IntRange?>(null) }
     var noteReturnVisible by remember(book.id, returnNoteId) { mutableStateOf(returnNoteId != null) }
     var noteReturnStartPageIndex by remember(book.id, returnNoteId) { mutableStateOf<Int?>(null) }
+    var jumpHighlightRange by remember(page.index) { mutableStateOf<IntRange?>(null) }
+    val jumpHighlightAlpha = remember { Animatable(0f) }
     var tts by remember { mutableStateOf<TextToSpeech?>(null) }
     var ttsReady by remember { mutableStateOf(false) }
     var ttsStatusText by remember { mutableStateOf("TTS 正在初始化") }
@@ -3272,6 +3302,19 @@ private fun ReaderScreen(
         }
     }
 
+    LaunchedEffect(highlightRequest?.token, page.index) {
+        val request = highlightRequest ?: return@LaunchedEffect
+        val range = page.jumpHighlightRange(request) ?: return@LaunchedEffect
+        jumpHighlightRange = range
+        jumpHighlightAlpha.snapTo(0f)
+        jumpHighlightAlpha.animateTo(0.36f, animationSpec = tween(130))
+        jumpHighlightAlpha.animateTo(0.12f, animationSpec = tween(140))
+        jumpHighlightAlpha.animateTo(0.30f, animationSpec = tween(130))
+        jumpHighlightAlpha.animateTo(0f, animationSpec = tween(760))
+        jumpHighlightRange = null
+        onHighlightConsumed(request)
+    }
+
     val currentChapterTitle = remember(chapters, page.firstParagraphIndex) {
         chapters.lastOrNull { it.paragraphIndex <= page.firstParagraphIndex }?.title
             ?: chapters.firstOrNull()?.title
@@ -3303,6 +3346,14 @@ private fun ReaderScreen(
     fun goToAnchor(anchor: ReaderPageAnchor) {
         val nextIndex = pages.findPageIndexForAnchor(anchor)
         goToPage(nextIndex)
+    }
+
+    LaunchedEffect(highlightRequest?.token) {
+        val request = highlightRequest ?: return@LaunchedEffect
+        val targetPage = pages.findPageIndexForHighlight(request)
+        if (targetPage >= 0 && targetPage != pageIndex) {
+            goToPage(targetPage)
+        }
     }
 
     fun goPreviousPage() {
@@ -3569,6 +3620,8 @@ private fun ReaderScreen(
                 settings = settings,
                 selectionRange = selectionRange,
                 wordSelectionRange = wordSelectionRange,
+                jumpHighlightRange = jumpHighlightRange,
+                jumpHighlightColor = MaterialTheme.colorScheme.primary.copy(alpha = jumpHighlightAlpha.value),
                 modifier = Modifier.fillMaxSize(),
                 onPreviousPage = { goPreviousPage() },
                 onNextPage = { goNextPage() },
@@ -3765,6 +3818,8 @@ private fun ReaderPageSurface(
     settings: ReaderSettings,
     selectionRange: IntRange?,
     wordSelectionRange: IntRange?,
+    jumpHighlightRange: IntRange?,
+    jumpHighlightColor: Color,
     selectedText: String,
     selectionTipVisible: Boolean,
     modifier: Modifier = Modifier,
@@ -3793,8 +3848,10 @@ private fun ReaderPageSurface(
         settings = settings,
         selectionRange = selectionRange,
         wordSelectionRange = wordSelectionRange,
+        jumpHighlightRange = jumpHighlightRange,
         selectionColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.22f),
         wordSelectionColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.26f),
+        jumpHighlightColor = jumpHighlightColor,
     )
 
     fun showControls() {
@@ -4279,6 +4336,40 @@ private fun ReaderPage.paragraphIndexForDisplayOffset(offset: Int): Int {
     return paragraphs.last().paragraphIndex
 }
 
+private fun List<ReaderPage>.findPageIndexForHighlight(request: ReaderHighlightRequest): Int {
+    val quote = request.text.trim()
+    if (quote.isNotBlank()) {
+        indexOfFirst { page -> page.text.contains(quote) }
+            .takeIf { it >= 0 }
+            ?.let { return it }
+    }
+    return indexOfFirst { page -> request.paragraphIndex in page.firstParagraphIndex..page.lastParagraphIndex }
+}
+
+private fun ReaderPage.jumpHighlightRange(request: ReaderHighlightRequest): IntRange? {
+    val quote = request.text.trim()
+    if (quote.length >= 2) {
+        val quoteStart = text.indexOf(quote)
+        if (quoteStart >= 0) {
+            return quoteStart..(quoteStart + quote.length - 1)
+        }
+    }
+    return displayRangeForParagraph(request.paragraphIndex)
+}
+
+private fun ReaderPage.displayRangeForParagraph(paragraphIndex: Int): IntRange? {
+    var cursor = 0
+    paragraphs.forEach { paragraph ->
+        val start = cursor
+        val endExclusive = start + paragraph.text.length
+        if (paragraph.paragraphIndex == paragraphIndex && endExclusive > start) {
+            return start..(endExclusive - 1)
+        }
+        cursor = endExclusive + 2
+    }
+    return null
+}
+
 @Composable
 private fun ReaderCornerMeta(
     bookTitle: String,
@@ -4474,20 +4565,31 @@ private fun readerPageAnnotatedString(
     settings: ReaderSettings,
     selectionRange: IntRange?,
     wordSelectionRange: IntRange?,
+    jumpHighlightRange: IntRange?,
     selectionColor: Color,
     wordSelectionColor: Color,
+    jumpHighlightColor: Color,
 ): AnnotatedString {
     val text = page.text
     return remember(
         text,
         settings.fontSizeSp,
+        jumpHighlightRange,
         selectionRange,
         wordSelectionRange,
+        jumpHighlightColor,
         selectionColor,
         wordSelectionColor,
     ) {
         buildAnnotatedString {
             append(text)
+            jumpHighlightRange?.let { range ->
+                addStyle(
+                    SpanStyle(background = jumpHighlightColor),
+                    range.first.coerceIn(0, text.length),
+                    (range.last + 1).coerceIn(0, text.length),
+                )
+            }
             wordSelectionRange?.let { range ->
                 addStyle(
                     SpanStyle(background = wordSelectionColor),
@@ -5646,7 +5748,7 @@ private fun NotesScreen(
     onDeleteLookupHistory: (List<LookupHistoryEntry>) -> Unit,
     onClearHistory: () -> Unit,
     onOpenSource: (String, Int) -> Unit,
-    onOpenNoteSource: (String, String, Int) -> Unit,
+    onOpenNoteSource: (String, String, Int, String?) -> Unit,
     onScrollTargetConsumed: () -> Unit,
 ) {
     var editingNote by remember { mutableStateOf<ReaderNote?>(null) }
@@ -5838,8 +5940,10 @@ private fun NotesScreen(
                                         }
                                     },
                                     onEdit = { editingNote = note },
-                                    onOpenSource = { onOpenNoteSource(note.id, note.bookId, note.paragraphIndex) },
-                                    onOpenAnchor = { paragraphIndex -> onOpenNoteSource(note.id, note.bookId, paragraphIndex) },
+                                    onOpenSource = { onOpenNoteSource(note.id, note.bookId, note.paragraphIndex, note.sentence) },
+                                    onOpenAnchor = { paragraphIndex, anchorText ->
+                                        onOpenNoteSource(note.id, note.bookId, paragraphIndex, anchorText)
+                                    },
                                     onDelete = { deletingNote = note },
                                 )
                             }
@@ -6167,7 +6271,7 @@ private fun NoteCard(
     onSelectedChange: (Boolean) -> Unit,
     onEdit: () -> Unit,
     onOpenSource: () -> Unit,
-    onOpenAnchor: (Int) -> Unit,
+    onOpenAnchor: (Int, String?) -> Unit,
     onDelete: () -> Unit,
 ) {
     val showDetails = expanded || displayMode == NotesDisplayMode.DETAIL
@@ -6361,7 +6465,7 @@ private fun NotePlainSection(
 private fun NoteMarkdownSection(
     title: String,
     markdown: String,
-    onOpenAnchor: (Int) -> Unit,
+    onOpenAnchor: (Int, String?) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(
