@@ -966,7 +966,7 @@ private fun EngReadApp() {
                                 selectedEntries.forEach { repository.deleteLookupHistory(it.id) }
                             }
                             refreshAll()
-                            showUndoMessage("已删除 ${selectedEntries.size} 条查词记录") {
+                            showUndoMessage("已删除 ${selectedEntries.size} 条查阅记录") {
                                 selectedEntries.forEach { repository.restoreLookupHistory(it) }
                             }
                         }
@@ -976,7 +976,7 @@ private fun EngReadApp() {
                             val removedEntries = lookupHistory
                             withContext(Dispatchers.IO) { repository.clearLookupHistory() }
                             refreshAll()
-                            showUndoMessage("查词历史已清空") {
+                            showUndoMessage("查阅历史已清空") {
                                 removedEntries.forEach { repository.restoreLookupHistory(it) }
                             }
                         }
@@ -5769,7 +5769,7 @@ private val NotesDisplayMode.contentDescription: String
 private enum class NotesFilter(val label: String) {
     ALL("全部"),
     NOTES("笔记"),
-    LOOKUPS("查词"),
+    LOOKUPS("查阅"),
 }
 
 private data class NotesBookFilterOption(
@@ -5792,6 +5792,18 @@ private sealed class NotesTimelineItem {
         override val updatedAt: Long = item.updatedAt
     }
 }
+
+private val ReaderNote.hasUserNoteContent: Boolean
+    get() = noteText.isNotBlank()
+
+private val LookupHistoryEntry.hasUserNoteContent: Boolean
+    get() = noteText.isNotBlank()
+
+private val NotesTimelineItem.hasUserNoteContent: Boolean
+    get() = when (this) {
+        is NotesTimelineItem.NoteItem -> note.hasUserNoteContent
+        is NotesTimelineItem.LookupItem -> item.hasUserNoteContent
+    }
 
 private fun String.compactText(maxChars: Int): String {
     val normalized = replace(Regex("\\s+"), " ").trim()
@@ -5883,13 +5895,17 @@ private fun NotesScreen(
     val listState = rememberLazyListState()
     val timelineItems = remember(filteredNotes, filteredLookupHistory, activeFilter) {
         buildList {
-            if (activeFilter == NotesFilter.ALL || activeFilter == NotesFilter.NOTES) {
-                filteredNotes.forEach { add(NotesTimelineItem.NoteItem(it)) }
+            filteredNotes.forEach { add(NotesTimelineItem.NoteItem(it)) }
+            filteredLookupHistory.forEach { add(NotesTimelineItem.LookupItem(it)) }
+        }
+            .filter { item ->
+                when (activeFilter) {
+                    NotesFilter.ALL -> true
+                    NotesFilter.NOTES -> item.hasUserNoteContent
+                    NotesFilter.LOOKUPS -> !item.hasUserNoteContent
+                }
             }
-            if (activeFilter == NotesFilter.ALL || activeFilter == NotesFilter.LOOKUPS) {
-                filteredLookupHistory.forEach { add(NotesTimelineItem.LookupItem(it)) }
-            }
-        }.sortedByDescending { it.updatedAt }
+            .sortedByDescending { it.updatedAt }
     }
 
     LaunchedEffect(selectedBookFilterId, bookFilterOptions) {
@@ -5913,12 +5929,17 @@ private fun NotesScreen(
             targetId.startsWith("history-") -> lookupHistory.firstOrNull { targetId == "history-${it.id}" }?.bookId
             else -> null
         }
+        val targetHasUserNote = when {
+            targetId.startsWith("note-") -> notes.firstOrNull { targetId == "note-${it.id}" }?.hasUserNoteContent
+            targetId.startsWith("history-") -> lookupHistory.firstOrNull { targetId == "history-${it.id}" }?.hasUserNoteContent
+            else -> null
+        }
         if (selectedBookFilterId != null && targetBookId != null && selectedBookFilterId != targetBookId) {
             selectedBookFilterId = null
         }
-        if (targetId.startsWith("note-") && filter == NotesFilter.LOOKUPS) {
+        if (targetHasUserNote == true && filter == NotesFilter.LOOKUPS) {
             filter = NotesFilter.ALL
-        } else if (targetId.startsWith("history-") && filter == NotesFilter.NOTES) {
+        } else if (targetHasUserNote == false && filter == NotesFilter.NOTES) {
             filter = NotesFilter.ALL
         }
     }
@@ -6014,7 +6035,7 @@ private fun NotesScreen(
                                     },
                                 )
                                 DropdownMenuItem(
-                                    text = { Text("清空查词") },
+                                    text = { Text("清空查阅") },
                                     leadingIcon = { Icon(Icons.Filled.History, contentDescription = null) },
                                     enabled = lookupHistory.isNotEmpty(),
                                     onClick = {
@@ -6418,8 +6439,8 @@ private fun EmptyFilteredNotes(
         Text(
             text = when (filter) {
                 NotesFilter.ALL -> "还没有记录"
-                NotesFilter.NOTES -> "还没有摘句笔记"
-                NotesFilter.LOOKUPS -> "还没有查词记录"
+                NotesFilter.NOTES -> "还没有自己的笔记"
+                NotesFilter.LOOKUPS -> "还没有查阅记录"
             }.let { text -> bookTitle?.let { "《$it》$text" } ?: text },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
