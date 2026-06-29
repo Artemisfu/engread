@@ -389,6 +389,8 @@ private fun EngReadApp() {
     var sendingChatBookId by remember { mutableStateOf<String?>(null) }
     var suggestingChatBookId by remember { mutableStateOf<String?>(null) }
     var preferredChatBookId by rememberSaveable { mutableStateOf("") }
+    var readerReturnNoteId by rememberSaveable { mutableStateOf<String?>(null) }
+    var notesScrollTargetId by rememberSaveable { mutableStateOf<String?>(null) }
     var chatSuggestionsByBook by remember { mutableStateOf<Map<String, List<String>>>(emptyMap()) }
     var undoNotices by remember { mutableStateOf<List<UndoNotice>>(emptyList()) }
     var lastHomeBackAt by remember { mutableStateOf(0L) }
@@ -424,7 +426,7 @@ private fun EngReadApp() {
         undoNotices = undoNotices.filterNot { it.id == id }
     }
 
-    fun openReader(book: Book, paragraphIndex: Int?) {
+    fun openReader(book: Book, paragraphIndex: Int?, returnNoteId: String? = null) {
         val targetParagraph = paragraphIndex?.coerceIn(0, (book.paragraphs.size - 1).coerceAtLeast(0))
         if (targetParagraph != null) {
             val now = System.currentTimeMillis()
@@ -439,12 +441,21 @@ private fun EngReadApp() {
                 repository.updateProgress(book.id, targetParagraph)
             }
         }
+        readerReturnNoteId = returnNoteId
         screen = AppScreen.Reader(book.id)
+    }
+
+    fun returnToNote(noteId: String) {
+        notesScrollTargetId = "note-$noteId"
+        readerReturnNoteId = null
+        refreshAll()
+        screen = AppScreen.Notes
     }
 
     BackHandler {
         when (screen) {
             is AppScreen.Reader -> {
+                readerReturnNoteId = null
                 refreshAll()
                 screen = AppScreen.Shelf
             }
@@ -691,6 +702,7 @@ private fun EngReadApp() {
     fun addChatTurnToNotes(book: Book, userMessage: ChatMessage, assistantMessage: ChatMessage) {
         val question = userMessage.content.chatQuestionForNote()
         val answer = assistantMessage.content.trim()
+        val quotedParagraph = userMessage.content.chatQuotedParagraphForNote()
         if (question.isBlank() || answer.isBlank()) {
             showMessage("这一轮对话还不完整")
             return
@@ -699,8 +711,8 @@ private fun EngReadApp() {
             withContext(Dispatchers.IO) {
                 repository.addNote(
                     book = book,
-                    paragraphIndex = book.lastReadParagraph,
-                    sentence = userMessage.content.chatQuotedParagraphForNote().orEmpty(),
+                    paragraphIndex = quotedParagraph?.let { book.paragraphIndexForQuote(it) } ?: book.lastReadParagraph,
+                    sentence = quotedParagraph.orEmpty(),
                     translationText = answer,
                     noteText = question,
                     noteType = ReaderNoteType.CHAT,
@@ -767,6 +779,7 @@ private fun EngReadApp() {
                         settings = settings,
                         modifier = Modifier.fillMaxSize(),
                         onBack = {
+                            readerReturnNoteId = null
                             refreshAll()
                             screen = AppScreen.Shelf
                         },
@@ -775,6 +788,7 @@ private fun EngReadApp() {
                             screen = AppScreen.Notes
                         },
                         onOpenChat = {
+                            readerReturnNoteId = null
                             book?.let { activeBook ->
                                 preferredChatBookId = activeBook.id
                                 refreshAll()
@@ -825,6 +839,7 @@ private fun EngReadApp() {
                         },
                         onChatSelection = { paragraphIndex, paragraph, question ->
                             book?.let { activeBook ->
+                                readerReturnNoteId = null
                                 preferredChatBookId = activeBook.id
                                 screen = AppScreen.Chat
                                 sendBookChatMessage(
@@ -850,6 +865,8 @@ private fun EngReadApp() {
                                 }
                             }
                         },
+                        returnNoteId = readerReturnNoteId,
+                        onReturnToNote = { noteId -> returnToNote(noteId) },
                     )
                 }
 
@@ -857,6 +874,7 @@ private fun EngReadApp() {
                     notes = notes,
                     lookupHistory = lookupHistory,
                     noteFont = settings.noteFont,
+                    scrollTargetId = notesScrollTargetId,
                     modifier = Modifier.fillMaxSize(),
                     bottomBar = {
                         HomeBottomBar(
@@ -928,6 +946,14 @@ private fun EngReadApp() {
                         books.firstOrNull { it.id == bookId }?.let { book ->
                             openReader(book, paragraphIndex)
                         } ?: showMessage("找不到原书")
+                    },
+                    onOpenNoteSource = { noteId, bookId, paragraphIndex ->
+                        books.firstOrNull { it.id == bookId }?.let { book ->
+                            openReader(book, paragraphIndex, noteId)
+                        } ?: showMessage("找不到原书")
+                    },
+                    onScrollTargetConsumed = {
+                        notesScrollTargetId = null
                     },
                 )
 
@@ -2060,6 +2086,18 @@ private fun String.chatQuotedParagraphForNote(): String? {
     return quoteLines.joinToString("\n").trim().takeIf { it.isNotBlank() }
 }
 
+private fun Book.paragraphIndexForQuote(quote: String): Int? {
+    val normalizedQuote = quote.normalizedForQuoteMatch()
+    if (normalizedQuote.isBlank()) return null
+    return paragraphs.indexOfFirst { paragraph ->
+        val normalizedParagraph = paragraph.normalizedForQuoteMatch()
+        normalizedParagraph.contains(normalizedQuote) || normalizedQuote.contains(normalizedParagraph)
+    }.takeIf { it >= 0 }
+}
+
+private fun String.normalizedForQuoteMatch(): String =
+    replace(Regex("\\s+"), " ").trim()
+
 private fun formatChatMessageTime(timestamp: Long): String {
     val now = Calendar.getInstance()
     val target = Calendar.getInstance().apply { timeInMillis = timestamp }
@@ -2939,6 +2977,8 @@ private fun ReaderScreen(
     onAddReadingTime: (Long) -> Unit,
     onChatSelection: (paragraphIndex: Int, paragraph: String, question: String) -> Unit,
     onAddLookupHistory: (paragraphIndex: Int, LookupHistoryType, sourceText: String, resultText: String, phonetic: String) -> Unit,
+    returnNoteId: String?,
+    onReturnToNote: (String) -> Unit,
 ) {
     if (book == null) {
         MissingBookScreen(modifier = modifier, onBack = onBack)
@@ -3017,6 +3057,8 @@ private fun ReaderScreen(
     var selectionEnd by remember(page.index) { mutableStateOf<Int?>(null) }
     var selectionTipVisible by remember(page.index) { mutableStateOf(false) }
     var wordSelectionRange by remember(page.index) { mutableStateOf<IntRange?>(null) }
+    var noteReturnVisible by remember(book.id, returnNoteId) { mutableStateOf(returnNoteId != null) }
+    var noteReturnStartPageIndex by remember(book.id, returnNoteId) { mutableStateOf<Int?>(null) }
     var tts by remember { mutableStateOf<TextToSpeech?>(null) }
     var ttsReady by remember { mutableStateOf(false) }
     var ttsStatusText by remember { mutableStateOf("TTS 正在初始化") }
@@ -3217,6 +3259,16 @@ private fun ReaderScreen(
             onProgress(page.firstParagraphIndex)
         } else if (currentAnchor == maxProgressAnchor) {
             onProgress(page.firstParagraphIndex)
+        }
+    }
+
+    LaunchedEffect(returnNoteId, pageIndex) {
+        if (returnNoteId == null) return@LaunchedEffect
+        val startPage = noteReturnStartPageIndex
+        if (startPage == null) {
+            noteReturnStartPageIndex = pageIndex
+        } else if (kotlin.math.abs(pageIndex - startPage) >= 3) {
+            noteReturnVisible = false
         }
     }
 
@@ -3617,6 +3669,14 @@ private fun ReaderScreen(
                         .pointerInput(wordStack.size) {
                             detectTapGestures(onTap = { closeTopWordCard() })
                         },
+                )
+            }
+            if (returnNoteId != null && noteReturnVisible) {
+                NoteReturnChip(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(start = 18.dp, top = 70.dp),
+                    onClick = { onReturnToNote(returnNoteId) },
                 )
             }
         }
@@ -4546,6 +4606,40 @@ private fun SelectionTipButton(
             maxLines = 1,
             softWrap = false,
         )
+    }
+}
+
+@Composable
+private fun NoteReturnChip(
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(999.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+        tonalElevation = 3.dp,
+        shadowElevation = 3.dp,
+        modifier = modifier,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "【笔记】",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.Bold,
+            )
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = "返回笔记",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(16.dp),
+            )
+        }
     }
 }
 
@@ -5551,6 +5645,7 @@ private fun NotesScreen(
     notes: List<ReaderNote>,
     lookupHistory: List<LookupHistoryEntry>,
     noteFont: ReaderFont,
+    scrollTargetId: String?,
     modifier: Modifier = Modifier,
     bottomBar: @Composable () -> Unit,
     onExport: () -> Unit,
@@ -5561,6 +5656,8 @@ private fun NotesScreen(
     onDeleteLookupHistory: (List<LookupHistoryEntry>) -> Unit,
     onClearHistory: () -> Unit,
     onOpenSource: (String, Int) -> Unit,
+    onOpenNoteSource: (String, String, Int) -> Unit,
+    onScrollTargetConsumed: () -> Unit,
 ) {
     var editingNote by remember { mutableStateOf<ReaderNote?>(null) }
     var editingLookupEntry by remember { mutableStateOf<LookupHistoryEntry?>(null) }
@@ -5576,6 +5673,7 @@ private fun NotesScreen(
     val selectedLookupEntries = lookupHistory.filter { selectedItemIds["history-${it.id}"] == true }
     val selectedItemCount = selectedNotes.size + selectedLookupEntries.size
     val activeFilter = filter
+    val listState = rememberLazyListState()
     val timelineItems = remember(notes, lookupHistory, activeFilter) {
         buildList {
             if (activeFilter == NotesFilter.ALL || activeFilter == NotesFilter.NOTES) {
@@ -5593,6 +5691,23 @@ private fun NotesScreen(
             if (!stillExists) selectedItemIds.remove(id)
         }
         if (notes.isEmpty() && lookupHistory.isEmpty()) batchDeleteMode = false
+    }
+
+    LaunchedEffect(scrollTargetId) {
+        val targetId = scrollTargetId ?: return@LaunchedEffect
+        if (targetId.startsWith("note-") && filter == NotesFilter.LOOKUPS) {
+            filter = NotesFilter.ALL
+        }
+    }
+
+    LaunchedEffect(scrollTargetId, timelineItems) {
+        val targetId = scrollTargetId ?: return@LaunchedEffect
+        val itemIndex = timelineItems.indexOfFirst { it.id == targetId }
+        if (itemIndex >= 0) {
+            expandedCards[targetId] = true
+            listState.animateScrollToItem(itemIndex + 1)
+            onScrollTargetConsumed()
+        }
     }
 
     Scaffold(
@@ -5688,6 +5803,7 @@ private fun NotesScreen(
             )
         } else {
             LazyColumn(
+                state = listState,
                 modifier = Modifier
                     .padding(padding)
                     .fillMaxSize()
@@ -5732,7 +5848,8 @@ private fun NotesScreen(
                                         }
                                     },
                                     onEdit = { editingNote = note },
-                                    onOpenSource = { onOpenSource(note.bookId, note.paragraphIndex) },
+                                    onOpenSource = { onOpenNoteSource(note.id, note.bookId, note.paragraphIndex) },
+                                    onOpenAnchor = { paragraphIndex -> onOpenNoteSource(note.id, note.bookId, paragraphIndex) },
                                     onDelete = { deletingNote = note },
                                 )
                             }
@@ -6060,11 +6177,13 @@ private fun NoteCard(
     onSelectedChange: (Boolean) -> Unit,
     onEdit: () -> Unit,
     onOpenSource: () -> Unit,
+    onOpenAnchor: (Int) -> Unit,
     onDelete: () -> Unit,
 ) {
     val showDetails = expanded || displayMode == NotesDisplayMode.DETAIL
     val showEnglishOnly = displayMode == NotesDisplayMode.ENGLISH && !showDetails
     val isChatNote = note.noteType == ReaderNoteType.CHAT
+    val shouldShowChatSource = isChatNote && note.sentence.isNotBlank()
     SwipeDeleteContainer(enabled = !batchDeleteMode, onDelete = onDelete) {
         Card(
             shape = RoundedCornerShape(8.dp),
@@ -6108,7 +6227,7 @@ private fun NoteCard(
                             modifier = Modifier.weight(1f),
                         )
                         if (!batchDeleteMode) {
-                            if (!isChatNote) {
+                            if (!isChatNote || shouldShowChatSource) {
                                 IconButton(onClick = onOpenSource) {
                                     Icon(Icons.Filled.AutoStories, contentDescription = "回原文")
                                 }
@@ -6130,9 +6249,21 @@ private fun NoteCard(
                         overflow = TextOverflow.Ellipsis,
                     )
                     if (isChatNote) {
+                        if (!showEnglishOnly && shouldShowChatSource) {
+                            NotePlainSection(
+                                title = "原文",
+                                text = if (showDetails) note.sentence else note.sentence.compactText(96),
+                                emphasized = true,
+                                maxLines = if (showDetails) Int.MAX_VALUE else 3,
+                            )
+                        }
                         if (!showEnglishOnly && note.noteText.isNotBlank()) {
                             if (showDetails) {
-                                NoteMarkdownSection(title = "提问", markdown = note.noteText)
+                                NoteMarkdownSection(
+                                    title = "提问",
+                                    markdown = note.noteText,
+                                    onOpenAnchor = onOpenAnchor,
+                                )
                             } else {
                                 NotePlainSection(
                                     title = "提问",
@@ -6143,7 +6274,11 @@ private fun NoteCard(
                         }
                         if (!showEnglishOnly && note.translationText.isNotBlank()) {
                             if (showDetails) {
-                                NoteMarkdownSection(title = "回答", markdown = note.translationText)
+                                NoteMarkdownSection(
+                                    title = "回答",
+                                    markdown = note.translationText,
+                                    onOpenAnchor = onOpenAnchor,
+                                )
                             } else {
                                 NotePlainSection(
                                     title = "回答",
@@ -6236,6 +6371,7 @@ private fun NotePlainSection(
 private fun NoteMarkdownSection(
     title: String,
     markdown: String,
+    onOpenAnchor: (Int) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(
@@ -6247,6 +6383,7 @@ private fun NoteMarkdownSection(
         MarkdownText(
             markdown = markdown,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            onOpenAnchor = onOpenAnchor,
         )
     }
 }
