@@ -4522,7 +4522,13 @@ private fun TableOfContentsDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Filled.AutoStories, contentDescription = null) },
-        title = { Text("目录") },
+        title = {
+            Text(
+                text = "目录",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Black,
+            )
+        },
         text = {
             LazyColumn(
                 modifier = Modifier.heightIn(max = 420.dp),
@@ -4566,11 +4572,11 @@ private fun TableOfContentsDialog(
                                 overflow = TextOverflow.Ellipsis,
                             )
                         }
-                        TextButton(
+                        IconButton(
                             onClick = { onContinue(item) },
                             enabled = item.progressAnchor != null,
                         ) {
-                            Text("继续读")
+                            Icon(Icons.Filled.PlayArrow, contentDescription = "继续读")
                         }
                     }
                 }
