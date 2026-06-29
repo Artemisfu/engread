@@ -905,6 +905,7 @@ private fun EngReadApp() {
                 }
 
                 AppScreen.Notes -> NotesScreen(
+                    books = books,
                     notes = notes,
                     lookupHistory = lookupHistory,
                     noteFont = settings.noteFont,
@@ -5767,6 +5768,12 @@ private enum class NotesFilter(val label: String) {
     LOOKUPS("查词"),
 }
 
+private data class NotesBookFilterOption(
+    val bookId: String,
+    val title: String,
+    val count: Int,
+)
+
 private sealed class NotesTimelineItem {
     abstract val id: String
     abstract val updatedAt: Long
@@ -5798,6 +5805,7 @@ private fun LookupHistoryEntry.summaryMeaning(): String =
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun NotesScreen(
+    books: List<Book>,
     notes: List<ReaderNote>,
     lookupHistory: List<LookupHistoryEntry>,
     noteFont: ReaderFont,
@@ -5819,25 +5827,71 @@ private fun NotesScreen(
     var deletingNote by remember { mutableStateOf<ReaderNote?>(null) }
     var batchDeleteConfirmOpen by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
+    var bookFilterOpen by remember { mutableStateOf(false) }
     var batchDeleteMode by remember { mutableStateOf(false) }
     var displayMode by remember { mutableStateOf(NotesDisplayMode.SUMMARY) }
     var filter by remember { mutableStateOf(NotesFilter.ALL) }
+    var selectedBookFilterId by rememberSaveable { mutableStateOf<String?>(null) }
     val selectedItemIds = remember { mutableStateMapOf<String, Boolean>() }
     val expandedCards = remember { mutableStateMapOf<String, Boolean>() }
-    val selectedNotes = notes.filter { selectedItemIds["note-${it.id}"] == true }
-    val selectedLookupEntries = lookupHistory.filter { selectedItemIds["history-${it.id}"] == true }
+    val bookFilterOptions = remember(books, notes, lookupHistory) {
+        val countsByBook = mutableMapOf<String, Int>()
+        val titlesByBook = mutableMapOf<String, String>()
+        notes.forEach { note ->
+            countsByBook[note.bookId] = (countsByBook[note.bookId] ?: 0) + 1
+            titlesByBook[note.bookId] = note.bookTitle
+        }
+        lookupHistory.forEach { entry ->
+            countsByBook[entry.bookId] = (countsByBook[entry.bookId] ?: 0) + 1
+            titlesByBook[entry.bookId] = entry.bookTitle
+        }
+        val knownBookIds = books.map { it.id }.toSet()
+        buildList {
+            books.forEach { book ->
+                val count = countsByBook[book.id] ?: return@forEach
+                add(NotesBookFilterOption(book.id, book.title, count))
+            }
+            countsByBook.keys
+                .filterNot { it in knownBookIds }
+                .sortedBy { titlesByBook[it].orEmpty() }
+                .forEach { bookId ->
+                    add(
+                        NotesBookFilterOption(
+                            bookId = bookId,
+                            title = titlesByBook[bookId].orEmpty().ifBlank { "已删除书籍" },
+                            count = countsByBook[bookId] ?: 0,
+                        )
+                    )
+                }
+        }
+    }
+    val selectedBookFilter = bookFilterOptions.firstOrNull { it.bookId == selectedBookFilterId }
+    val filteredNotes = remember(notes, selectedBookFilterId) {
+        selectedBookFilterId?.let { bookId -> notes.filter { it.bookId == bookId } } ?: notes
+    }
+    val filteredLookupHistory = remember(lookupHistory, selectedBookFilterId) {
+        selectedBookFilterId?.let { bookId -> lookupHistory.filter { it.bookId == bookId } } ?: lookupHistory
+    }
+    val selectedNotes = filteredNotes.filter { selectedItemIds["note-${it.id}"] == true }
+    val selectedLookupEntries = filteredLookupHistory.filter { selectedItemIds["history-${it.id}"] == true }
     val selectedItemCount = selectedNotes.size + selectedLookupEntries.size
     val activeFilter = filter
     val listState = rememberLazyListState()
-    val timelineItems = remember(notes, lookupHistory, activeFilter) {
+    val timelineItems = remember(filteredNotes, filteredLookupHistory, activeFilter) {
         buildList {
             if (activeFilter == NotesFilter.ALL || activeFilter == NotesFilter.NOTES) {
-                notes.forEach { add(NotesTimelineItem.NoteItem(it)) }
+                filteredNotes.forEach { add(NotesTimelineItem.NoteItem(it)) }
             }
             if (activeFilter == NotesFilter.ALL || activeFilter == NotesFilter.LOOKUPS) {
-                lookupHistory.forEach { add(NotesTimelineItem.LookupItem(it)) }
+                filteredLookupHistory.forEach { add(NotesTimelineItem.LookupItem(it)) }
             }
         }.sortedByDescending { it.updatedAt }
+    }
+
+    LaunchedEffect(selectedBookFilterId, bookFilterOptions) {
+        if (selectedBookFilterId != null && selectedBookFilter == null) {
+            selectedBookFilterId = null
+        }
     }
 
     LaunchedEffect(notes, lookupHistory) {
@@ -5850,6 +5904,14 @@ private fun NotesScreen(
 
     LaunchedEffect(scrollTargetId) {
         val targetId = scrollTargetId ?: return@LaunchedEffect
+        val targetBookId = when {
+            targetId.startsWith("note-") -> notes.firstOrNull { targetId == "note-${it.id}" }?.bookId
+            targetId.startsWith("history-") -> lookupHistory.firstOrNull { targetId == "history-${it.id}" }?.bookId
+            else -> null
+        }
+        if (selectedBookFilterId != null && targetBookId != null && selectedBookFilterId != targetBookId) {
+            selectedBookFilterId = null
+        }
         if (targetId.startsWith("note-") && filter == NotesFilter.LOOKUPS) {
             filter = NotesFilter.ALL
         } else if (targetId.startsWith("history-") && filter == NotesFilter.NOTES) {
@@ -5915,6 +5977,21 @@ private fun NotesScreen(
                                 )
                             } else {
                                 DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = selectedBookFilter?.let { "筛选书籍：${it.title}" } ?: "筛选书籍",
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    },
+                                    leadingIcon = { Icon(Icons.Filled.AutoStories, contentDescription = null) },
+                                    enabled = bookFilterOptions.isNotEmpty(),
+                                    onClick = {
+                                        menuOpen = false
+                                        bookFilterOpen = true
+                                    },
+                                )
+                                DropdownMenuItem(
                                     text = { Text("导出") },
                                     leadingIcon = { Icon(Icons.Filled.Download, contentDescription = null) },
                                     onClick = {
@@ -5978,9 +6055,26 @@ private fun NotesScreen(
                         },
                     )
                 }
+                selectedBookFilter?.let { bookFilter ->
+                    item {
+                        ActiveBookFilterChip(
+                            title = bookFilter.title,
+                            count = bookFilter.count,
+                            enabled = !batchDeleteMode,
+                            onClear = {
+                                selectedBookFilterId = null
+                                selectedItemIds.clear()
+                                expandedCards.clear()
+                            },
+                        )
+                    }
+                }
                 if (timelineItems.isEmpty()) {
                     item {
-                        EmptyFilteredNotes(filter = activeFilter)
+                        EmptyFilteredNotes(
+                            filter = activeFilter,
+                            bookTitle = selectedBookFilter?.title,
+                        )
                     }
                 } else {
                     itemsIndexed(timelineItems, key = { _, item -> item.id }) { _, timelineItem ->
@@ -6125,6 +6219,20 @@ private fun NotesScreen(
             },
         )
     }
+
+    if (bookFilterOpen) {
+        NotesBookFilterDialog(
+            options = bookFilterOptions,
+            selectedBookId = selectedBookFilterId,
+            onDismiss = { bookFilterOpen = false },
+            onSelect = { bookId ->
+                bookFilterOpen = false
+                selectedBookFilterId = bookId
+                selectedItemIds.clear()
+                expandedCards.clear()
+            },
+        )
+    }
 }
 
 @Composable
@@ -6169,7 +6277,135 @@ private fun NotesFilterRow(
 }
 
 @Composable
-private fun EmptyFilteredNotes(filter: NotesFilter) {
+private fun ActiveBookFilterChip(
+    title: String,
+    count: Int,
+    enabled: Boolean,
+    onClear: () -> Unit,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.46f),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Icon(
+                Icons.Filled.AutoStories,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(18.dp),
+            )
+            Text(
+                text = "$title · $count 条",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(
+                onClick = onClear,
+                enabled = enabled,
+                modifier = Modifier.size(32.dp),
+            ) {
+                Icon(Icons.Filled.Close, contentDescription = "清除书籍筛选")
+            }
+        }
+    }
+}
+
+@Composable
+private fun NotesBookFilterDialog(
+    options: List<NotesBookFilterOption>,
+    selectedBookId: String?,
+    onDismiss: () -> Unit,
+    onSelect: (String?) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Filled.AutoStories, contentDescription = null) },
+        title = { Text("筛选书籍") },
+        text = {
+            LazyColumn(
+                modifier = Modifier.heightIn(max = 420.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                item {
+                    BookFilterOptionRow(
+                        title = "全部书籍",
+                        subtitle = "${options.sumOf { it.count }} 条记录",
+                        selected = selectedBookId == null,
+                        onClick = { onSelect(null) },
+                    )
+                }
+                itemsIndexed(options, key = { _, item -> item.bookId }) { _, item ->
+                    BookFilterOptionRow(
+                        title = item.title,
+                        subtitle = "${item.count} 条记录",
+                        selected = selectedBookId == item.bookId,
+                        onClick = { onSelect(item.bookId) },
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("关闭")
+            }
+        },
+    )
+}
+
+@Composable
+private fun BookFilterOptionRow(
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 6.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        RadioButton(
+            selected = selected,
+            onClick = onClick,
+        )
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun EmptyFilteredNotes(
+    filter: NotesFilter,
+    bookTitle: String? = null,
+) {
     Surface(
         color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(8.dp),
@@ -6180,7 +6416,7 @@ private fun EmptyFilteredNotes(filter: NotesFilter) {
                 NotesFilter.ALL -> "还没有记录"
                 NotesFilter.NOTES -> "还没有摘句笔记"
                 NotesFilter.LOOKUPS -> "还没有查词记录"
-            },
+            }.let { text -> bookTitle?.let { "《$it》$text" } ?: text },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
