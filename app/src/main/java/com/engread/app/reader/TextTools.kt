@@ -62,6 +62,7 @@ data class BookChapter(
 
 enum class BookChatStreamChunkType {
     THINKING_APPEND,
+    THINKING_REPLACE,
     FINAL_APPEND,
     FINAL_REPLACE,
 }
@@ -73,6 +74,7 @@ data class BookChatStreamChunk(
 
 private const val BookChatFinalAnswerMarker = "<ENGREAD_FINAL_ANSWER>"
 private const val BookChatMaxToolRounds = 4
+private val BookChatToolNames = setOf("search_book", "get_text_block", "get_table_of_contents")
 private val BookChatFinalAnswerMarkerVariants = listOf(
     BookChatFinalAnswerMarker,
     "</ENGREAD_FINAL_ANSWER>",
@@ -645,11 +647,17 @@ private fun TranslationSettings.createBookToolLoopCompletion(book: Book, userPro
             tools = toolsForRound,
         )
         lastContent = message.optActualString("content").trim()
-        val toolCalls = message.optJSONArray("tool_calls")
+        val standardToolCalls = message.optJSONArray("tool_calls")?.takeIf { it.length() > 0 }
+        val compatToolCalls = if (standardToolCalls == null && toolsForRound != null) {
+            lastContent.extractCompatBookToolCalls()
+        } else {
+            null
+        }
+        val toolCalls = standardToolCalls ?: compatToolCalls
         if (toolCalls == null || toolCalls.length() == 0) {
             return lastContent.stripBookChatFinalMarker().takeIf { it.isNotBlank() } ?: error("服务没有返回可用内容。")
         }
-        messages.put(message)
+        messages.put(message.asAssistantToolMessage(toolCalls, compatToolCalls != null))
         for (index in 0 until toolCalls.length()) {
             val call = toolCalls.optJSONObject(index) ?: continue
             val function = call.optJSONObject("function") ?: continue
@@ -689,7 +697,13 @@ private suspend fun TranslationSettings.createBookToolLoopCompletionStreaming(
             },
         )
         lastContent = message.optActualString("content").trim()
-        val toolCalls = message.optJSONArray("tool_calls")
+        val standardToolCalls = message.optJSONArray("tool_calls")?.takeIf { it.length() > 0 }
+        val compatToolCalls = if (standardToolCalls == null && toolsForRound != null) {
+            lastContent.extractCompatBookToolCalls()
+        } else {
+            null
+        }
+        val toolCalls = standardToolCalls ?: compatToolCalls
         if (toolCalls == null || toolCalls.length() == 0) {
             finalMarkerParser.flushThinking(onChunk)
             if (!finalMarkerParser.finalStarted && lastContent.isNotBlank()) {
@@ -702,8 +716,12 @@ private suspend fun TranslationSettings.createBookToolLoopCompletionStreaming(
                 ?: lastContent.stripBookChatFinalMarker().takeIf { it.isNotBlank() }
                 ?: error("服务没有返回可用内容。")
         }
-        finalMarkerParser.flushThinking(onChunk)
-        messages.put(message)
+        if (compatToolCalls != null) {
+            finalMarkerParser.replaceThinking("", onChunk)
+        } else {
+            finalMarkerParser.flushThinking(onChunk)
+        }
+        messages.put(message.asAssistantToolMessage(toolCalls, compatToolCalls != null))
         for (index in 0 until toolCalls.length()) {
             val call = toolCalls.optJSONObject(index) ?: continue
             val function = call.optJSONObject("function") ?: continue
@@ -1048,6 +1066,17 @@ private class BookChatFinalMarkerParser(
         }
     }
 
+    suspend fun replaceThinking(
+        text: String,
+        onChunk: suspend (BookChatStreamChunk) -> Unit,
+    ) {
+        if (finalStarted) return
+        pending.clear()
+        thinkingBuilder.clear()
+        thinkingBuilder.append(text)
+        onChunk(BookChatStreamChunk(BookChatStreamChunkType.THINKING_REPLACE, text))
+    }
+
     suspend fun flushFinal(onChunk: suspend (BookChatStreamChunk) -> Unit) {
         if (finalStarted && finalPending.isNotEmpty()) {
             appendFinal("", onChunk, force = true)
@@ -1357,6 +1386,99 @@ private fun String.removeBookChatFinalMarkers(): String =
 
 private fun String.stripBookChatFinalMarker(): String =
     removeBookChatFinalMarkers().trim()
+
+private fun String.extractCompatBookToolCalls(): JSONArray? {
+    val trimmed = trim()
+        .removePrefix("```json")
+        .removePrefix("```")
+        .removeSuffix("```")
+        .trim()
+    if (trimmed.isBlank()) return null
+    val candidates = buildList {
+        Regex("<tool_calls?[^>]*>(.*?)</tool_calls?>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+            .findAll(trimmed)
+            .map { it.groupValues.getOrElse(1) { "" }.trim() }
+            .filter { it.isNotBlank() }
+            .forEach { add(it) }
+        val objectStart = trimmed.indexOf('{')
+        val objectEnd = trimmed.lastIndexOf('}')
+        if (objectStart >= 0 && objectEnd > objectStart) {
+            add(trimmed.substring(objectStart, objectEnd + 1))
+        }
+        val arrayStart = trimmed.indexOf('[')
+        val arrayEnd = trimmed.lastIndexOf(']')
+        if (arrayStart >= 0 && arrayEnd > arrayStart) {
+            add(trimmed.substring(arrayStart, arrayEnd + 1))
+        }
+    }.distinct()
+    candidates.forEach { candidate ->
+        runCatching {
+            val normalized = if (candidate.trimStart().startsWith("[")) {
+                JSONArray(candidate).normalizedCompatBookToolCalls()
+            } else {
+                JSONObject(candidate).normalizedCompatBookToolCalls()
+            }
+            if (normalized.length() > 0) return normalized
+        }
+    }
+    return null
+}
+
+private fun JSONObject.normalizedCompatBookToolCalls(): JSONArray {
+    optJSONArray("tool_calls")?.normalizedCompatBookToolCalls()?.takeIf { it.length() > 0 }?.let { return it }
+    optJSONArray("toolCalls")?.normalizedCompatBookToolCalls()?.takeIf { it.length() > 0 }?.let { return it }
+    return JSONArray().also { array ->
+        normalizedCompatBookToolCall(0)?.let { array.put(it) }
+    }
+}
+
+private fun JSONArray.normalizedCompatBookToolCalls(): JSONArray =
+    JSONArray().also { normalized ->
+        for (index in 0 until length()) {
+            val call = optJSONObject(index)?.normalizedCompatBookToolCall(index) ?: continue
+            normalized.put(call)
+        }
+    }
+
+private fun JSONObject.normalizedCompatBookToolCall(index: Int): JSONObject? {
+    val function = optJSONObject("function")
+    val name = listOfNotNull(
+        function?.optActualString("name"),
+        optActualString("name"),
+        optActualString("tool_name"),
+        optActualString("tool"),
+    ).firstOrNull { it.isNotBlank() }?.trim() ?: return null
+    if (name !in BookChatToolNames) return null
+    val argumentValue = function?.opt("arguments")
+        ?: opt("arguments")
+        ?: opt("parameters")
+        ?: opt("input")
+    val arguments = when (argumentValue) {
+        is JSONObject -> argumentValue.toString()
+        is String -> argumentValue
+        null, JSONObject.NULL -> "{}"
+        else -> argumentValue.toString()
+    }
+    return JSONObject()
+        .put("id", optActualString("id").ifBlank { "engread_compat_tool_call_$index" })
+        .put("type", "function")
+        .put(
+            "function",
+            JSONObject()
+                .put("name", name)
+                .put("arguments", arguments),
+        )
+}
+
+private fun JSONObject.asAssistantToolMessage(toolCalls: JSONArray, fromCompatText: Boolean): JSONObject =
+    if (fromCompatText) {
+        JSONObject()
+            .put("role", "assistant")
+            .put("content", "")
+            .put("tool_calls", toolCalls)
+    } else {
+        this
+    }
 
 private fun String.toChatCompletionsEndpoint(): String {
     val trimmed = trim().trimEnd('/')

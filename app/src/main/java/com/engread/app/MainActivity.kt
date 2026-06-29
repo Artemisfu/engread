@@ -645,6 +645,10 @@ private fun EngReadApp() {
                     ) { chunk ->
                         when (chunk.type) {
                             BookChatStreamChunkType.THINKING_APPEND -> streamedThinking.append(chunk.text)
+                            BookChatStreamChunkType.THINKING_REPLACE -> {
+                                streamedThinking.clear()
+                                streamedThinking.append(chunk.text)
+                            }
                             BookChatStreamChunkType.FINAL_APPEND -> streamedAnswer.append(chunk.text)
                             BookChatStreamChunkType.FINAL_REPLACE -> {
                                 streamedAnswer.clear()
