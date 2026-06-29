@@ -3674,8 +3674,8 @@ private fun ReaderScreen(
             if (returnNoteId != null && noteReturnVisible) {
                 NoteReturnChip(
                     modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(start = 18.dp, top = 70.dp),
+                        .align(Alignment.TopEnd)
+                        .padding(end = 18.dp, top = 16.dp),
                     onClick = { onReturnToNote(returnNoteId) },
                 )
             }
