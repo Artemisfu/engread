@@ -4184,7 +4184,7 @@ private fun buildViewportReaderPages(
     val measuredWidth = textWidthPx.coerceAtLeast(1).toFloat()
     val maxLineUnits = ((textHeightPx - 8).coerceAtLeast(1) / lineHeightPx)
         .coerceAtLeast(8f)
-        .let { it - 0.35f }
+        .let { it - 1.45f }
     val pages = mutableListOf<ReaderPage>()
     val current = mutableListOf<ReaderPageParagraph>()
     var currentLineUnits = 0f
@@ -4382,7 +4382,7 @@ private fun estimateReaderLineUnits(
     hasDropInitial: Boolean,
 ): Float {
     if (text.isBlank()) return 0f
-    val usableWidth = (textWidthPx * 0.985f).coerceAtLeast(fontSizePx * 4f)
+    val usableWidth = (textWidthPx * 0.965f).coerceAtLeast(fontSizePx * 4f)
     var lineCount = 1
     var lineWidth = 0f
     var index = 0
