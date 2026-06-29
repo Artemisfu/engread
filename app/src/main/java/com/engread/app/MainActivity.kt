@@ -461,8 +461,8 @@ private fun EngReadApp() {
         screen = AppScreen.Reader(book.id)
     }
 
-    fun returnToNote(noteId: String) {
-        notesScrollTargetId = "note-$noteId"
+    fun returnToNote(targetId: String) {
+        notesScrollTargetId = targetId
         readerReturnNoteId = null
         refreshAll()
         screen = AppScreen.Notes
@@ -748,6 +748,7 @@ private fun EngReadApp() {
             }
             chatSuggestionsByBook = chatSuggestionsByBook - book.id
             refreshAll()
+            requestChatSuggestions(book, prioritizeLastAssistantQuestion = false)
             showMessage("已清空《${book.title}》对话")
         }
     }
@@ -964,14 +965,9 @@ private fun EngReadApp() {
                             }
                         }
                     },
-                    onOpenSource = { bookId, paragraphIndex ->
+                    onOpenNoteSource = { targetId, bookId, paragraphIndex, highlightText ->
                         books.firstOrNull { it.id == bookId }?.let { book ->
-                            openReader(book, paragraphIndex)
-                        } ?: showMessage("找不到原书")
-                    },
-                    onOpenNoteSource = { noteId, bookId, paragraphIndex, highlightText ->
-                        books.firstOrNull { it.id == bookId }?.let { book ->
-                            openReader(book, paragraphIndex, noteId, highlightText)
+                            openReader(book, paragraphIndex, targetId, highlightText)
                         } ?: showMessage("找不到原书")
                     },
                     onScrollTargetConsumed = {
@@ -1885,7 +1881,7 @@ private fun ChatSuggestionsPanel(
                 Icon(Icons.Filled.Refresh, contentDescription = "换一批")
             }
         }
-        if (loading) {
+        if (loading && questions.isEmpty()) {
             val brush = ShimmerBrush()
             repeat(3) { index ->
                 Box(
@@ -5747,7 +5743,6 @@ private fun NotesScreen(
     onDeleteSelectedItems: (List<ReaderNote>, List<LookupHistoryEntry>) -> Unit,
     onDeleteLookupHistory: (List<LookupHistoryEntry>) -> Unit,
     onClearHistory: () -> Unit,
-    onOpenSource: (String, Int) -> Unit,
     onOpenNoteSource: (String, String, Int, String?) -> Unit,
     onScrollTargetConsumed: () -> Unit,
 ) {
@@ -5788,6 +5783,8 @@ private fun NotesScreen(
     LaunchedEffect(scrollTargetId) {
         val targetId = scrollTargetId ?: return@LaunchedEffect
         if (targetId.startsWith("note-") && filter == NotesFilter.LOOKUPS) {
+            filter = NotesFilter.ALL
+        } else if (targetId.startsWith("history-") && filter == NotesFilter.NOTES) {
             filter = NotesFilter.ALL
         }
     }
@@ -5940,9 +5937,9 @@ private fun NotesScreen(
                                         }
                                     },
                                     onEdit = { editingNote = note },
-                                    onOpenSource = { onOpenNoteSource(note.id, note.bookId, note.paragraphIndex, note.sentence) },
+                                    onOpenSource = { onOpenNoteSource(timelineItem.id, note.bookId, note.paragraphIndex, note.sentence) },
                                     onOpenAnchor = { paragraphIndex, anchorText ->
-                                        onOpenNoteSource(note.id, note.bookId, paragraphIndex, anchorText)
+                                        onOpenNoteSource(timelineItem.id, note.bookId, paragraphIndex, anchorText)
                                     },
                                     onDelete = { deletingNote = note },
                                 )
@@ -5966,7 +5963,14 @@ private fun NotesScreen(
                                         }
                                     },
                                     onEdit = { editingLookupEntry = timelineItem.item },
-                                    onOpenSource = { onOpenSource(timelineItem.item.bookId, timelineItem.item.paragraphIndex) },
+                                    onOpenSource = {
+                                        onOpenNoteSource(
+                                            timelineItem.id,
+                                            timelineItem.item.bookId,
+                                            timelineItem.item.paragraphIndex,
+                                            timelineItem.item.sourceText,
+                                        )
+                                    },
                                     onDelete = { onDeleteLookupHistory(listOf(timelineItem.item)) },
                                 )
                             }
@@ -6540,13 +6544,13 @@ private fun LookupHistoryCard(
                             modifier = Modifier.weight(1f),
                         )
                         if (!batchDeleteMode) {
+                            IconButton(onClick = onOpenSource) {
+                                Icon(Icons.Filled.AutoStories, contentDescription = "回原文")
+                            }
                             if (item.type == LookupHistoryType.TRANSLATION) {
                                 IconButton(onClick = onEdit) {
                                     Icon(Icons.Filled.Edit, contentDescription = "编辑笔记")
                                 }
-                            }
-                            IconButton(onClick = onOpenSource) {
-                                Icon(Icons.Filled.AutoStories, contentDescription = "回原文")
                             }
                         }
                     }
