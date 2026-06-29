@@ -1444,7 +1444,12 @@ private fun ChatScreen(
     }
     var localSuggestionsLoading by rememberSaveable(selectedBookId) { mutableStateOf(false) }
     var initialSuggestionsRequested by rememberSaveable(selectedBookId) { mutableStateOf(false) }
-    val visibleSuggestions = if (suggestionsSkeleton) emptyList() else remoteSuggestions.ifEmpty { localSuggestions }
+    val visibleSuggestions = when {
+        suggestionsSkeleton -> emptyList()
+        remoteSuggestions.isNotEmpty() -> remoteSuggestions
+        !settings.translation.isConfigured -> localSuggestions
+        else -> emptyList()
+    }
     val suggestionsAreLoading = suggestionsLoading ||
         localSuggestionsLoading ||
         (selectedBook != null && settings.translation.isConfigured && remoteSuggestions.isEmpty())
