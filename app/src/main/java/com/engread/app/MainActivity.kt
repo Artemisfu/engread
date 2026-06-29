@@ -1178,12 +1178,15 @@ private fun HomeBottomBar(
     }
 }
 
-private fun List<WordEntry>.replaceAtOrAppend(index: Int, entry: WordEntry): List<WordEntry> =
+private fun List<WordEntry>.replaceAtIfPresent(index: Int, entry: WordEntry): List<WordEntry> =
     if (index in indices) {
         mapIndexed { itemIndex, item -> if (itemIndex == index) entry else item }
     } else {
-        this + entry
+        this
     }
+
+private fun List<WordEntry>.hasSameWordAt(index: Int, word: String): Boolean =
+    index in indices && this[index].word.equals(word, ignoreCase = true)
 
 private fun WordEntry.toLookupHistoryText(): String =
     buildString {
@@ -1548,8 +1551,9 @@ private fun ChatScreen(
                     }
                     result.onSuccess { enriched ->
                         if (requestSerial != wordLookupSerial) return@onSuccess
+                        if (!wordStack.hasSameWordAt(targetIndex, immediateEntry.word)) return@onSuccess
                         val merged = immediateEntry.mergeLlmWordDetails(enriched)
-                        wordStack = wordStack.replaceAtOrAppend(targetIndex, merged)
+                        wordStack = wordStack.replaceAtIfPresent(targetIndex, merged)
                         onAddLookupHistory(
                             book,
                             paragraphIndex,
@@ -1560,7 +1564,8 @@ private fun ChatScreen(
                         )
                     }.onFailure {
                         if (requestSerial != wordLookupSerial) return@onFailure
-                        wordStack = wordStack.replaceAtOrAppend(
+                        if (!wordStack.hasSameWordAt(targetIndex, immediateEntry.word)) return@onFailure
+                        wordStack = wordStack.replaceAtIfPresent(
                             targetIndex,
                             immediateEntry.copy(detailsLoading = false),
                         )
@@ -1589,7 +1594,8 @@ private fun ChatScreen(
             }
             result.onSuccess { entry ->
                 if (requestSerial != wordLookupSerial) return@onSuccess
-                wordStack = wordStack.replaceAtOrAppend(targetIndex, entry)
+                if (!wordStack.hasSameWordAt(targetIndex, normalizedWord)) return@onSuccess
+                wordStack = wordStack.replaceAtIfPresent(targetIndex, entry)
                 onAddLookupHistory(
                     book,
                     paragraphIndex,
@@ -1600,7 +1606,8 @@ private fun ChatScreen(
                 )
             }.onFailure { error ->
                 if (requestSerial != wordLookupSerial) return@onFailure
-                wordStack = wordStack.replaceAtOrAppend(
+                if (!wordStack.hasSameWordAt(targetIndex, normalizedWord)) return@onFailure
+                wordStack = wordStack.replaceAtIfPresent(
                     targetIndex,
                     WordEntry(
                         word = normalizedWord,
@@ -3578,8 +3585,9 @@ private fun ReaderScreen(
                     }
                     result.onSuccess { enriched ->
                         if (requestSerial != wordLookupSerial) return@onSuccess
+                        if (!wordStack.hasSameWordAt(targetIndex, immediateEntry.word)) return@onSuccess
                         val merged = immediateEntry.mergeLlmWordDetails(enriched)
-                        wordStack = wordStack.replaceAtOrAppend(targetIndex, merged)
+                        wordStack = wordStack.replaceAtIfPresent(targetIndex, merged)
                         onAddLookupHistory(
                             paragraphIndex,
                             LookupHistoryType.WORD,
@@ -3589,7 +3597,8 @@ private fun ReaderScreen(
                         )
                     }.onFailure {
                         if (requestSerial != wordLookupSerial) return@onFailure
-                        wordStack = wordStack.replaceAtOrAppend(
+                        if (!wordStack.hasSameWordAt(targetIndex, immediateEntry.word)) return@onFailure
+                        wordStack = wordStack.replaceAtIfPresent(
                             targetIndex,
                             immediateEntry.copy(detailsLoading = false),
                         )
@@ -3612,7 +3621,8 @@ private fun ReaderScreen(
             }
             result.onSuccess { entry ->
                 if (replaceStack && requestSerial != wordLookupSerial) return@onSuccess
-                wordStack = wordStack.replaceAtOrAppend(targetIndex, entry)
+                if (!wordStack.hasSameWordAt(targetIndex, normalizedWord)) return@onSuccess
+                wordStack = wordStack.replaceAtIfPresent(targetIndex, entry)
                 onAddLookupHistory(
                     paragraphIndex,
                     LookupHistoryType.WORD,
@@ -3622,7 +3632,8 @@ private fun ReaderScreen(
                 )
             }.onFailure { error ->
                 if (replaceStack && requestSerial != wordLookupSerial) return@onFailure
-                wordStack = wordStack.replaceAtOrAppend(
+                if (!wordStack.hasSameWordAt(targetIndex, normalizedWord)) return@onFailure
+                wordStack = wordStack.replaceAtIfPresent(
                     targetIndex,
                     WordEntry(
                         word = normalizedWord,
