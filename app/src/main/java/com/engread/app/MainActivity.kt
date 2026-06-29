@@ -395,6 +395,7 @@ private fun EngReadApp() {
     var settings by remember { mutableStateOf(repository.getSettings()) }
     var sendingChatBookId by remember { mutableStateOf<String?>(null) }
     var suggestingChatBookId by remember { mutableStateOf<String?>(null) }
+    var suggestionSkeletonBookId by remember { mutableStateOf<String?>(null) }
     var preferredChatBookId by rememberSaveable { mutableStateOf("") }
     var readerReturnNoteId by rememberSaveable { mutableStateOf<String?>(null) }
     var notesScrollTargetId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -524,26 +525,37 @@ private fun EngReadApp() {
         }
     }
 
-    fun requestChatSuggestions(book: Book, prioritizeLastAssistantQuestion: Boolean = true) {
+    fun requestChatSuggestions(
+        book: Book,
+        prioritizeLastAssistantQuestion: Boolean = true,
+        showSkeleton: Boolean = true,
+    ) {
         if (!settings.translation.isConfigured) {
             chatSuggestionsByBook = chatSuggestionsByBook + (book.id to defaultReadingQuestions.randomThree())
             return
         }
         scope.launch {
             suggestingChatBookId = book.id
+            if (showSkeleton) {
+                suggestionSkeletonBookId = book.id
+                chatSuggestionsByBook = chatSuggestionsByBook - book.id
+            }
             val result = withContext(Dispatchers.IO) {
-                runCatching {
-                    val chat = repository.getBookChat(book.id)
-                    OpenAiBookChat.suggestQuestions(
-                        book = book,
-                        summary = chat?.summary.orEmpty(),
-                        recentMessages = chat?.messages.orEmpty().takeLast(10),
-                        settings = settings.translation,
-                        prioritizeLastAssistantQuestion = prioritizeLastAssistantQuestion,
-                    )
-                }
+                withTimeoutOrNull(12_000) {
+                    runCatching {
+                        val chat = repository.getBookChat(book.id)
+                        OpenAiBookChat.suggestQuestions(
+                            book = book,
+                            summary = chat?.summary.orEmpty(),
+                            recentMessages = chat?.messages.orEmpty().takeLast(10),
+                            settings = settings.translation,
+                            prioritizeLastAssistantQuestion = prioritizeLastAssistantQuestion,
+                        )
+                    }
+                } ?: Result.failure(IllegalStateException("猜你想问生成超时"))
             }
             suggestingChatBookId = null
+            if (suggestionSkeletonBookId == book.id) suggestionSkeletonBookId = null
             result.onSuccess { questions ->
                 chatSuggestionsByBook = chatSuggestionsByBook + (book.id to questions.ifEmpty { defaultReadingQuestions.randomThree() })
             }.onFailure {
@@ -697,7 +709,7 @@ private fun EngReadApp() {
             sendingChatBookId = null
             if (answerResult.isSuccess) {
                 refreshAll()
-                requestChatSuggestions(book)
+                requestChatSuggestions(book, showSkeleton = true)
             } else {
                 val error = answerResult.exceptionOrNull()
                 withContext(Dispatchers.IO) {
@@ -748,7 +760,7 @@ private fun EngReadApp() {
             }
             chatSuggestionsByBook = chatSuggestionsByBook - book.id
             refreshAll()
-            requestChatSuggestions(book, prioritizeLastAssistantQuestion = false)
+            requestChatSuggestions(book, prioritizeLastAssistantQuestion = false, showSkeleton = false)
             showMessage("已清空《${book.title}》对话")
         }
     }
@@ -980,6 +992,7 @@ private fun EngReadApp() {
                     bookChats = bookChats,
                     sendingBookId = sendingChatBookId,
                     suggestingBookId = suggestingChatBookId,
+                    suggestionSkeletonBookId = suggestionSkeletonBookId,
                     focusBookId = preferredChatBookId,
                     suggestionsByBook = chatSuggestionsByBook,
                     settings = settings,
@@ -992,7 +1005,7 @@ private fun EngReadApp() {
                     },
                     onSendMessage = { book, text -> sendBookChatMessage(book, text) },
                     onRefreshSuggestions = { book, prioritizeLastAssistantQuestion ->
-                        requestChatSuggestions(book, prioritizeLastAssistantQuestion)
+                        requestChatSuggestions(book, prioritizeLastAssistantQuestion, showSkeleton = true)
                     },
                     onClearChat = { book -> clearBookChat(book) },
                     onAddChatNote = { book, userMessage, assistantMessage ->
@@ -1387,6 +1400,7 @@ private fun ChatScreen(
     bookChats: List<BookChat>,
     sendingBookId: String?,
     suggestingBookId: String?,
+    suggestionSkeletonBookId: String?,
     focusBookId: String,
     suggestionsByBook: Map<String, List<String>>,
     settings: ReaderSettings,
@@ -1420,12 +1434,13 @@ private fun ChatScreen(
     val isSending = selectedBook != null && sendingBookId == selectedBook.id
     val suggestionsLoading = selectedBook != null && suggestingBookId == selectedBook.id
     val remoteSuggestions = selectedBook?.let { suggestionsByBook[it.id] }.orEmpty()
+    val suggestionsSkeleton = selectedBook != null && suggestionSkeletonBookId == selectedBook.id
     var localSuggestions by rememberSaveable(selectedBookId) {
         mutableStateOf(defaultReadingQuestions.randomThree())
     }
     var localSuggestionsLoading by rememberSaveable(selectedBookId) { mutableStateOf(false) }
     var initialSuggestionsRequested by rememberSaveable(selectedBookId) { mutableStateOf(false) }
-    val visibleSuggestions = remoteSuggestions.ifEmpty { localSuggestions }
+    val visibleSuggestions = if (suggestionsSkeleton) emptyList() else remoteSuggestions.ifEmpty { localSuggestions }
     val suggestionsAreLoading = suggestionsLoading ||
         localSuggestionsLoading ||
         (selectedBook != null && settings.translation.isConfigured && remoteSuggestions.isEmpty())
@@ -1646,6 +1661,9 @@ private fun ChatScreen(
                         itemsIndexed(messages, key = { _, message -> message.id }) { _, message ->
                             ChatMessageBubble(
                                 message = message,
+                                streaming = isSending &&
+                                    message.role != ChatRole.USER &&
+                                    message.id == messages.lastOrNull()?.id,
                                 onLookupWord = { lookupChatWord(it) },
                                 onOpenAnchor = { paragraphIndex, anchorText ->
                                     selectedBook?.let { onOpenReader(it, paragraphIndex, anchorText) }
@@ -1656,11 +1674,6 @@ private fun ChatScreen(
                                     }
                                 },
                             )
-                        }
-                        if (isSending) {
-                            item {
-                                ChatThinkingBubble()
-                            }
                         }
                         if (!isSending) {
                             item {
@@ -1915,6 +1928,7 @@ private fun ChatSuggestionsPanel(
 @Composable
 private fun ChatMessageBubble(
     message: ChatMessage,
+    streaming: Boolean,
     onLookupWord: (String) -> Unit,
     onOpenAnchor: (Int, String?) -> Unit,
     onAddNote: (() -> Unit)?,
@@ -1948,6 +1962,19 @@ private fun ChatMessageBubble(
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
+                    if (!fromUser && streaming && !hasFinalContent && message.thinking.isBlank()) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Text(
+                                text = "思考中",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                     if (!fromUser && message.thinking.isNotBlank()) {
                         ChatThinkingProcess(
                             text = message.thinking,
